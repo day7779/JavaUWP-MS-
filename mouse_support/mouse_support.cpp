@@ -14,6 +14,10 @@
 
 #pragma comment(lib, "ws2_32.lib")
 
+#ifndef SIO_UDP_CONNRESET
+#define SIO_UDP_CONNRESET _WSAIOW(IOC_VENDOR, 12)
+#endif
+
 namespace {
 
 const unsigned short kInputPort = 7331;

@@ -26,6 +26,9 @@
 #include <ws2tcpip.h>
 #include <mstcpip.h>
 #include <timeapi.h>
+#ifndef SIO_UDP_CONNRESET
+#define SIO_UDP_CONNRESET _WSAIOW(IOC_VENDOR, 12)
+#endif
 using SocketHandle = SOCKET;
 static constexpr SocketHandle kInvalidSocket = INVALID_SOCKET;
 #else
