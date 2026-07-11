@@ -2194,6 +2194,20 @@ static void PollGameInputMouse() {
     const int64_t wheelY = state.wheelY - g_lastGameInputMouseState.wheelY;
     g_lastGameInputMouseState = state;
 
+    const int64_t kMaxSaneMouseDelta = 4096;
+    const int64_t kMaxSaneWheelDelta = 1200;
+    if (dx > kMaxSaneMouseDelta || dx < -kMaxSaneMouseDelta ||
+        dy > kMaxSaneMouseDelta || dy < -kMaxSaneMouseDelta ||
+        wheelX > kMaxSaneWheelDelta || wheelX < -kMaxSaneWheelDelta ||
+        wheelY > kMaxSaneWheelDelta || wheelY < -kMaxSaneWheelDelta) {
+        if (g_gameinput_log_count < 32) {
+            ++g_gameinput_log_count;
+            ShimLog("GameInput mouse counter reset detected dx=%lld dy=%lld wheel=%lld,%lld (reseeded)",
+                (long long)dx, (long long)dy, (long long)wheelX, (long long)wheelY);
+        }
+        return;
+    }
+
     if (dx || dy) {
         DispatchMouseDelta(ClampInt64ToInt(dx), ClampInt64ToInt(dy));
     }
@@ -2643,6 +2657,9 @@ extern "C" __declspec(dllexport) void glfwPollEvents(void) {
     if (g_poll_log_count < 8) {
         ++g_poll_log_count;
         ShimLog("glfwPollEvents #%d", g_poll_log_count);
+    }
+    if (MouseCompanionActive()) {
+        DrainRemoteMouseInput();
     }
     if (g_dispatcher) {
         boolean hasDispatcherAccess = false;

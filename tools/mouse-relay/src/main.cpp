@@ -7,6 +7,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -23,7 +24,11 @@
 #define NOMINMAX
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <mstcpip.h>
 #include <timeapi.h>
+#ifndef SIO_UDP_CONNRESET
+#define SIO_UDP_CONNRESET _WSAIOW(IOC_VENDOR, 12)
+#endif
 using SocketHandle = SOCKET;
 static constexpr SocketHandle kInvalidSocket = INVALID_SOCKET;
 #else
@@ -42,7 +47,7 @@ constexpr uint16_t kInputPort = 7331;
 constexpr uint16_t kStatusPort = 7332;
 constexpr float kTargetWidth = 1920.0f;
 constexpr float kTargetHeight = 1080.0f;
-constexpr double kSendIntervalSeconds = 1.0 / 240.0;
+constexpr double kLoopIntervalSeconds = 1.0 / 240.0;
 constexpr double kHeldButtonRefreshSeconds = 1.0 / 20.0;
 constexpr double kConnectProbeSeconds = 0.25;
 constexpr double kConnectTimeoutSeconds = 3.0;
@@ -97,15 +102,9 @@ static double NowSeconds() {
 }
 
 static void SleepUntil(double deadline) {
-    for (;;) {
-        const double remaining = deadline - NowSeconds();
-        if (remaining <= 0.0) {
-            return;
-        }
-        // sleep the bulk, spin the last ~1ms since SDL_Delay only resolves to the timer tick
-        if (remaining > 0.002) {
-            SDL_Delay(static_cast<Uint32>((remaining - 0.001) * 1000.0));
-        }
+    const double remaining = deadline - NowSeconds();
+    if (remaining > 0.0) {
+        SDL_DelayPrecise(static_cast<Uint64>(remaining * 1000000000.0));
     }
 }
 
@@ -461,8 +460,6 @@ struct WinsockRuntime {
 };
 
 struct TimerResolution {
-    // windows scheduler ticks at ~15.6ms by default, capping SDL_Delay and the loop
-    // at ~64hz; request 1ms so the 240hz send pacing is actually reachable
     bool raised = (timeBeginPeriod(1) == TIMERR_NOERROR);
     ~TimerResolution() {
         if (raised) {
@@ -538,6 +535,13 @@ public:
 
         int reuse = 1;
         setsockopt(statusSock_, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&reuse), sizeof(reuse));
+
+#ifdef _WIN32
+        BOOL connReset = FALSE;
+        DWORD ioBytes = 0;
+        WSAIoctl(inputSock_, SIO_UDP_CONNRESET, &connReset, sizeof(connReset), nullptr, 0, &ioBytes, nullptr, nullptr);
+        WSAIoctl(statusSock_, SIO_UDP_CONNRESET, &connReset, sizeof(connReset), nullptr, 0, &ioBytes, nullptr, nullptr);
+#endif
 
         sockaddr_in statusAddr{};
         statusAddr.sin_family = AF_INET;
@@ -654,7 +658,8 @@ public:
     }
 
     ~RelayApp() {
-        netRunning_ = false;
+        netRunning_.store(false, std::memory_order_relaxed);
+        sendWake_.notify_all();
         if (netThread_.joinable()) {
             netThread_.join();
         }
@@ -700,7 +705,7 @@ public:
             return;
         case SDL_EVENT_MOUSE_MOTION:
             if (!enteringIp_ && !menuOpen_) {
-                AddMotion(event.motion.xrel, event.motion.yrel);
+                AddMotion(event.motion.xrel, event.motion.yrel, false);
             }
             if (holdAction_ != UiAction::None && !PointerOverHoldButton(event.motion.x, event.motion.y)) {
                 CancelHold();
@@ -722,7 +727,7 @@ public:
             return;
         case SDL_EVENT_FINGER_MOTION:
             if (!enteringIp_ && !menuOpen_ && !IsTouchControlFinger(event.tfinger.fingerID)) {
-                AddMotion(event.tfinger.dx * static_cast<float>(windowWidth_), event.tfinger.dy * static_cast<float>(windowHeight_));
+                AddMotion(event.tfinger.dx * static_cast<float>(windowWidth_), event.tfinger.dy * static_cast<float>(windowHeight_), true);
             }
             return;
         default:
@@ -759,32 +764,29 @@ public:
     void PumpAndTick() {
         SDL_Event event{};
         while (SDL_PollEvent(&event)) {
-            std::lock_guard<std::mutex> lock(sendMutex_);
-            HandleEvent(event);
+            {
+                std::lock_guard<std::mutex> lock(sendMutex_);
+                HandleEvent(event);
+            }
+            sendWake_.notify_one();
         }
         {
             std::lock_guard<std::mutex> lock(sendMutex_);
             Tick();
         }
+        sendWake_.notify_one();
     }
 
 private:
     void NetLoop() {
 #ifdef _WIN32
-        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
 #endif
-        double nextTick = NowSeconds();
+        std::unique_lock<std::mutex> lock(sendMutex_);
         while (netRunning_.load(std::memory_order_relaxed)) {
-            {
-                std::lock_guard<std::mutex> lock(sendMutex_);
-                SendPendingPackets();
-            }
-            nextTick += kSendIntervalSeconds;
-            const double now = NowSeconds();
-            if (nextTick < now) {
-                nextTick = now;
-            }
-            SleepUntil(nextTick);
+            sendWake_.wait_for(lock, std::chrono::milliseconds(50));
+            if (!netRunning_.load(std::memory_order_relaxed)) break;
+            SendPendingPackets();
         }
     }
 
@@ -1357,18 +1359,18 @@ private:
         SetMouseCapture(true);
     }
 
-    void AddMotion(float rawDx, float rawDy) {
+    void AddMotion(double rawDx, double rawDy, bool scaleTouchInput) {
         if (mode_ == RelayMode::Menu) {
-            const float dx = rawDx * MenuScaleX();
-            const float dy = rawDy * MenuScaleY();
+            const float dx = static_cast<float>(rawDx * MenuScaleX());
+            const float dy = static_cast<float>(rawDy * MenuScaleY());
             if (dx != 0.0f || dy != 0.0f) {
                 virtualX_ = Clamp(virtualX_ + dx, 0.0f, MenuTargetWidth() - 1.0f);
                 virtualY_ = Clamp(virtualY_ + dy, 0.0f, MenuTargetHeight() - 1.0f);
                 motionPending_ = true;
             }
-        } else if (rawDx != 0.0f || rawDy != 0.0f) {
-            accumDx_ += rawDx * scaleX_;
-            accumDy_ += rawDy * scaleY_;
+        } else if (rawDx != 0.0 || rawDy != 0.0) {
+            accumDx_ += scaleTouchInput ? rawDx * scaleX_ : rawDx;
+            accumDy_ += scaleTouchInput ? rawDy * scaleY_ : rawDy;
             motionPending_ = true;
         }
     }
@@ -1573,7 +1575,7 @@ private:
         }
     }
 
-    std::string FormatPacket(float dx, float dy, const std::array<int, 5>& buttons, float scroll) const {
+    std::string FormatPacket(double dx, double dy, const std::array<int, 5>& buttons, double scroll) const {
         char buffer[160]{};
         std::snprintf(
             buffer,
@@ -1590,14 +1592,14 @@ private:
         return buffer;
     }
 
-    std::string FormatAbsPacket(float x, float y, const std::array<int, 5>& buttons, float scroll) const {
+    std::string FormatAbsPacket(double x, double y, const std::array<int, 5>& buttons, double scroll) const {
         char buffer[180]{};
         std::snprintf(
             buffer,
             sizeof(buffer),
             "ABSW:%.4f,%.4f,%d,%d,%d,%.4f,%d,%d",
-            MenuToWindowX(x),
-            MenuToWindowY(y),
+            MenuToWindowX(static_cast<float>(x)),
+            MenuToWindowY(static_cast<float>(y)),
             buttons[0],
             buttons[1],
             buttons[2],
@@ -1623,42 +1625,33 @@ private:
             }
         }
 
-        const bool motionDue = motionPending_ && (now - lastMotionSend_) >= kSendIntervalSeconds;
+        const bool haveMotion = motionPending_;
         const bool heldRefreshDue = AnyLocalMouseButtonDown() && (now - lastHeldButtonRefresh_) >= kHeldButtonRefreshSeconds;
         if (heldRefreshDue) {
             packetButtons = buttonState_;
             haveButtonChange = true;
         }
 
-        if (haveButtonChange || pendingScroll_ != 0.0f || motionDue) {
-            const float scroll = pendingScroll_;
-            pendingScroll_ = 0.0f;
-
+        if (haveButtonChange || pendingScroll_ != 0.0 || haveMotion) {
+            const double scroll = pendingScroll_;
             const std::string packet = mode_ == RelayMode::Menu
                 ? FormatAbsPacket(virtualX_, virtualY_, packetButtons, scroll)
                 : FormatPacket(accumDx_, accumDy_, packetButtons, scroll);
 
             if (transport_.Send(packet)) {
                 ++sentPackets_;
-            }
+                pendingScroll_ = 0.0;
+                accumDx_ = 0.0;
+                accumDy_ = 0.0;
+                motionPending_ = false;
+                if (heldRefreshDue) {
+                    lastHeldButtonRefresh_ = now;
+                }
 
-            accumDx_ = 0.0f;
-            accumDy_ = 0.0f;
-            motionPending_ = false;
-            lastMotionSend_ = now;
-            if (lastSendStamp_ > 0.0) {
-                const double dtMs = (now - lastSendStamp_) * 1000.0;
-                sendDtMinMs_ = std::min(sendDtMinMs_, dtMs);
-                sendDtMaxMs_ = std::max(sendDtMaxMs_, dtMs);
-            }
-            lastSendStamp_ = now;
-            if (heldRefreshDue) {
-                lastHeldButtonRefresh_ = now;
-            }
-
-            for (size_t i = 0; i < packetButtons.size(); ++i) {
-                if (packetButtons[i] != -1) {
-                    lastSentButtons_[i] = packetButtons[i];
+                for (size_t i = 0; i < packetButtons.size(); ++i) {
+                    if (packetButtons[i] != -1) {
+                        lastSentButtons_[i] = packetButtons[i];
+                    }
                 }
             }
         }
@@ -1819,19 +1812,13 @@ private:
             diagPixelW, diagPixelH, SDL_GetWindowDisplayScale(window_));
         DrawText(18.0f, 162.0f, diagLine, SDL_Color{ 150, 205, 165, 255 });
 
-        char sendLine[120];
-        std::snprintf(sendLine, sizeof(sendLine), "Send dt(ms): min=%.1f max=%.1f (even ~4.2 = no render starvation)", sendDtMinMs_, sendDtMaxMs_);
-        DrawText(18.0f, 182.0f, sendLine, SDL_Color{ 205, 195, 150, 255 });
-        sendDtMinMs_ = 1000.0;
-        sendDtMaxMs_ = 0.0;
-
         char logLine[256];
         if (g_packetLog.Enabled()) {
             std::snprintf(logLine, sizeof(logLine), "Packet log: ON -> %s", g_packetLog.Path().c_str());
         } else {
             std::snprintf(logLine, sizeof(logLine), "Packet log: off (press F10 to record sent/received packets)");
         }
-        DrawText(18.0f, 202.0f, logLine, g_packetLog.Enabled() ? SDL_Color{ 235, 180, 90, 255 } : SDL_Color{ 145, 158, 174, 255 });
+        DrawText(18.0f, 182.0f, logLine, g_packetLog.Enabled() ? SDL_Color{ 235, 180, 90, 255 } : SDL_Color{ 145, 158, 174, 255 });
 
         if (menuOpen_) {
             const float panelHeight = kTouchLayout ? 360.0f : 300.0f;
@@ -1898,24 +1885,21 @@ private:
 
     float virtualX_ = kTargetWidth * kMenuCoordinateScale * 0.5f;
     float virtualY_ = kTargetHeight * kMenuCoordinateScale * 0.5f;
-    float accumDx_ = 0.0f;
-    float accumDy_ = 0.0f;
-    float pendingScroll_ = 0.0f;
+    double accumDx_ = 0.0;
+    double accumDy_ = 0.0;
+    double pendingScroll_ = 0.0;
     float touchScrollStep_ = 0.0f;
     bool motionPending_ = false;
     double connectStart_ = 0.0;
     double lastConnectProbe_ = 0.0;
-    double lastMotionSend_ = 0.0;
     double lastHeldButtonRefresh_ = 0.0;
     double lastTouchScrollRepeat_ = 0.0;
     double lastPing_ = 0.0;
-    double lastSendStamp_ = 0.0;
-    double sendDtMinMs_ = 1000.0;
-    double sendDtMaxMs_ = 0.0;
     std::atomic<uint64_t> sentPackets_{ 0 };
     uint64_t statusPackets_ = 0;
 
     std::mutex sendMutex_;
+    std::condition_variable sendWake_;
     std::thread netThread_;
     std::atomic<bool> netRunning_{ false };
 };
@@ -1924,8 +1908,8 @@ private:
 
 #ifdef _WIN32
 static void RaiseRelaySchedulingPriority() {
-    SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS);
-    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+    SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS);
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_NORMAL);
     PROCESS_POWER_THROTTLING_STATE throttling{};
     throttling.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
     throttling.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED;
@@ -1982,7 +1966,7 @@ int main(int, char**) {
                 lastRender = now;
             }
 
-            nextTick += kSendIntervalSeconds;
+            nextTick += kLoopIntervalSeconds;
             if (nextTick < now) {
                 nextTick = now;
             }

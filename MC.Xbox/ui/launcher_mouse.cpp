@@ -85,8 +85,8 @@ void LauncherMouse::Update(float renderWidth, float renderHeight) {
                 y_ = static_cast<float>(frame.absY) * (renderHeight / kProtocolHeight);
             }
         } else {
-            x_ += static_cast<float>(frame.dx) * (renderWidth / kProtocolWidth);
-            y_ += static_cast<float>(frame.dy) * (renderHeight / kProtocolHeight);
+            x_ += static_cast<float>(frame.dx);
+            y_ += static_cast<float>(frame.dy);
         }
         if (x_ < 0.0f) x_ = 0.0f;
         if (y_ < 0.0f) y_ = 0.0f;

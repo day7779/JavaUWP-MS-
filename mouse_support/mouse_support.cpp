@@ -2,6 +2,7 @@
 #define MOUSE_SUPPORT_EXPORTS
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <mstcpip.h>
 #include <windows.h>
 #include <stdio.h>
 #include <stdarg.h>
@@ -13,6 +14,10 @@
 
 #pragma comment(lib, "ws2_32.lib")
 
+#ifndef SIO_UDP_CONNRESET
+#define SIO_UDP_CONNRESET _WSAIOW(IOC_VENDOR, 12)
+#endif
+
 namespace {
 
 const unsigned short kInputPort = 7331;
@@ -23,9 +28,9 @@ const double kProtocolHeight = 1080.0;
 const int kCursorModeNormal = 0x00034001;
 const int kCursorModeDisabled = 0x00034003;
 const DWORD kModeStabilizeMs = 150;
-const double kDefaultFreshnessMs = 50.0;
 
-SRWLOCK g_lock = SRWLOCK_INIT;
+SRWLOCK g_stateLock = SRWLOCK_INIT;
+SRWLOCK g_mailboxLock = SRWLOCK_INIT;
 mousesupport::MouseMailbox g_mailbox;
 
 MouseSupportHostState g_host = { 1920, 1080, 960, 540, kCursorModeDisabled, 960.0, 540.0 };
@@ -48,10 +53,6 @@ long long g_qpcStart = 0;
 double g_qpcTicksPerMicro = 1.0;
 
 bool g_diag = false;
-long long g_freshnessMicros = (long long)(kDefaultFreshnessMs * 1000.0);
-double g_clampMax = 0.0;
-double g_smoothAlpha = 0.0;
-double g_stallMs = 200.0;
 long long g_lastConsumeMicros = 0;
 FILE* g_diagFile = nullptr;
 bool g_diagFileTried = false;
@@ -84,7 +85,6 @@ void DiagLog(const char* fmt, ...) {
     DiagOpenIfNeeded();
     if (g_diagFile) {
         fprintf(g_diagFile, "%s\n", line);
-        fflush(g_diagFile);
     } else {
         OutputDebugStringA("[ms-diag] ");
         OutputDebugStringA(line);
@@ -132,12 +132,12 @@ void EnsureStatusSocket() {
 void SendStatusText(const char* text) {
     sockaddr_in target = {};
     bool haveTarget = false;
-    AcquireSRWLockShared(&g_lock);
+    AcquireSRWLockShared(&g_stateLock);
     if (g_haveStatusAddr) {
         target = g_statusAddr;
         haveTarget = true;
     }
-    ReleaseSRWLockShared(&g_lock);
+    ReleaseSRWLockShared(&g_stateLock);
     if (!haveTarget) return;
 
     EnsureStatusSocket();
@@ -149,10 +149,10 @@ void SendStatusText(const char* text) {
 void RememberStatusAddress(const sockaddr_in& from) {
     sockaddr_in statusTo = from;
     statusTo.sin_port = htons(kStatusPort);
-    AcquireSRWLockExclusive(&g_lock);
+    AcquireSRWLockExclusive(&g_stateLock);
     g_statusAddr = statusTo;
     g_haveStatusAddr = true;
-    ReleaseSRWLockExclusive(&g_lock);
+    ReleaseSRWLockExclusive(&g_stateLock);
 }
 
 DWORD WINAPI ReceiveThreadProc(LPVOID) {
@@ -174,14 +174,18 @@ DWORD WINAPI ReceiveThreadProc(LPVOID) {
         return 0;
     }
 
-    int rcvBuf = 256 * 1024;
+    int rcvBuf = 1024 * 1024;
     setsockopt(sock, SOL_SOCKET, SO_RCVBUF, reinterpret_cast<const char*>(&rcvBuf), sizeof(rcvBuf));
     DWORD rcvTimeoutMs = 50;
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&rcvTimeoutMs), sizeof(rcvTimeoutMs));
 
-    Log("listening on UDP %u (freshness %lldms)", kInputPort, g_freshnessMicros / 1000);
+    BOOL connReset = FALSE;
+    DWORD ioBytes = 0;
+    WSAIoctl(sock, SIO_UDP_CONNRESET, &connReset, sizeof(connReset), nullptr, 0, &ioBytes, nullptr, nullptr);
 
-    char buf[64];
+    Log("listening on UDP %u (raw accumulator)", kInputPort);
+
+    char buf[256];
     unsigned int packetCount = 0;
     int lastSentStatusMode = -1;
     long long lastRecvLogMicros = NowMicros();
@@ -195,7 +199,7 @@ DWORD WINAPI ReceiveThreadProc(LPVOID) {
 
         int windowWidth, windowHeight, menuWidth, menuHeight, stableMode;
         double menuCursorX, menuCursorY;
-        AcquireSRWLockExclusive(&g_lock);
+        AcquireSRWLockExclusive(&g_stateLock);
         windowWidth = g_host.windowWidth;
         windowHeight = g_host.windowHeight;
         menuWidth = g_host.menuWidth;
@@ -203,7 +207,7 @@ DWORD WINAPI ReceiveThreadProc(LPVOID) {
         menuCursorX = g_host.menuCursorX;
         menuCursorY = g_host.menuCursorY;
         stableMode = StableModeLocked();
-        ReleaseSRWLockExclusive(&g_lock);
+        ReleaseSRWLockExclusive(&g_stateLock);
 
         if (len <= 0) {
             const char* status = (stableMode == kCursorModeDisabled) ? "MODE:GAMEPLAY" : "MODE:MENU";
@@ -240,7 +244,7 @@ DWORD WINAPI ReceiveThreadProc(LPVOID) {
             continue;
         }
 
-        float dx = 0.0f, dy = 0.0f, wheelY = 0.0f;
+        double dx = 0.0, dy = 0.0, wheelY = 0.0;
         int lb = -1, rb = -1, mb = -1, x1 = -1, x2 = -1;
         bool absolutePacket = false;
         bool absoluteWindowPacket = false;
@@ -248,12 +252,12 @@ DWORD WINAPI ReceiveThreadProc(LPVOID) {
         if (strncmp(buf, "ABSW:", 5) == 0) {
             absolutePacket = true;
             absoluteWindowPacket = true;
-            fields = sscanf_s(buf + 5, "%f,%f,%d,%d,%d,%f,%d,%d", &dx, &dy, &lb, &rb, &mb, &wheelY, &x1, &x2);
+            fields = sscanf_s(buf + 5, "%lf,%lf,%d,%d,%d,%lf,%d,%d", &dx, &dy, &lb, &rb, &mb, &wheelY, &x1, &x2);
         } else if (strncmp(buf, "ABS:", 4) == 0) {
             absolutePacket = true;
-            fields = sscanf_s(buf + 4, "%f,%f,%d,%d,%d,%f,%d,%d", &dx, &dy, &lb, &rb, &mb, &wheelY, &x1, &x2);
+            fields = sscanf_s(buf + 4, "%lf,%lf,%d,%d,%d,%lf,%d,%d", &dx, &dy, &lb, &rb, &mb, &wheelY, &x1, &x2);
         } else {
-            fields = sscanf_s(buf, "%f,%f,%d,%d,%d,%f,%d,%d", &dx, &dy, &lb, &rb, &mb, &wheelY, &x1, &x2);
+            fields = sscanf_s(buf, "%lf,%lf,%d,%d,%d,%lf,%d,%d", &dx, &dy, &lb, &rb, &mb, &wheelY, &x1, &x2);
         }
         if (fields != 8) {
             const char bad[] = "javauwp_glfw_mouse:bad_packet";
@@ -262,11 +266,11 @@ DWORD WINAPI ReceiveThreadProc(LPVOID) {
         }
 
         const long long tMicros = NowMicros();
-        AcquireSRWLockExclusive(&g_lock);
+        AcquireSRWLockExclusive(&g_mailboxLock);
         if (absolutePacket) {
-            g_mailbox.submitAbsolute(tMicros, (double)dx, (double)dy, absoluteWindowPacket, (double)wheelY);
+            g_mailbox.submitAbsolute(tMicros, dx, dy, absoluteWindowPacket, wheelY);
         } else {
-            g_mailbox.submitRelative(tMicros, (double)dx, (double)dy, (double)wheelY);
+            g_mailbox.submitRelative(tMicros, dx, dy, wheelY);
         }
         g_mailbox.submitButtonValue(1, lb);
         g_mailbox.submitButtonValue(2, rb);
@@ -274,16 +278,15 @@ DWORD WINAPI ReceiveThreadProc(LPVOID) {
         g_mailbox.submitButtonValue(8, x1);
         g_mailbox.submitButtonValue(16, x2);
         const long long recvTotal = g_mailbox.receivedCount();
-        const long long overwrites = g_mailbox.overwriteCount();
         const int depth = g_mailbox.depth();
-        ReleaseSRWLockExclusive(&g_lock);
+        ReleaseSRWLockExclusive(&g_mailboxLock);
 
         ++recvSinceLog;
         if (g_diag) {
             const long long sinceLog = tMicros - lastRecvLogMicros;
             if (sinceLog >= 1000000) {
                 const double pps = (double)recvSinceLog * 1000000.0 / (double)sinceLog;
-                DiagLog("recv pps=%.0f total=%lld depth=%d overwrites=%lld", pps, recvTotal, depth, overwrites);
+                DiagLog("recv pps=%.0f total=%lld pending=%d", pps, recvTotal, depth);
                 lastRecvLogMicros = tMicros;
                 recvSinceLog = 0;
             }
@@ -324,16 +327,6 @@ const char* GapBucket(double gapMs) {
     return "<=16ms";
 }
 
-double ReadEnvDouble(const char* name, double fallback, double lo, double hi) {
-    char buf[32] = {};
-    const DWORD n = GetEnvironmentVariableA(name, buf, sizeof(buf));
-    if (n == 0 || n >= sizeof(buf)) return fallback;
-    const double value = atof(buf);
-    if (value < lo) return lo;
-    if (value > hi) return hi;
-    return value;
-}
-
 }
 
 extern "C" {
@@ -355,25 +348,21 @@ MOUSE_SUPPORT_API void MouseSupport_Init(void) {
     QueryPerformanceCounter(&start);
     g_qpcStart = start.QuadPart;
 
-    const double freshnessMs = ReadEnvDouble("BANDIT_MOUSE_FRESHNESS_MS", kDefaultFreshnessMs, 0.0, 1000.0);
-    g_freshnessMicros = (long long)(freshnessMs * 1000.0);
-    g_clampMax = ReadEnvDouble("BANDIT_MOUSE_CLAMP", 0.0, 0.0, 100000.0);
-    g_smoothAlpha = ReadEnvDouble("BANDIT_MOUSE_SMOOTH_ALPHA", 0.0, 0.0, 1.0);
-    g_stallMs = ReadEnvDouble("BANDIT_MOUSE_STALL_MS", 200.0, 50.0, 5000.0);
     char diagBuf[16] = {};
     const DWORD dn = GetEnvironmentVariableA("BANDIT_MOUSE_DIAG", diagBuf, sizeof(diagBuf));
     g_diag = (dn > 0 && diagBuf[0] != '0');
 
-    AcquireSRWLockExclusive(&g_lock);
+    AcquireSRWLockExclusive(&g_mailboxLock);
     g_mailbox.reset();
-    g_mailbox.setSmoothingAlpha(g_smoothAlpha);
-    g_mailbox.setStallThresholdMicros((long long)(g_stallMs * 1000.0));
-    ReleaseSRWLockExclusive(&g_lock);
+    ReleaseSRWLockExclusive(&g_mailboxLock);
     g_lastConsumeMicros = NowMicros();
 
     InterlockedExchange(&g_shutdown, 0);
     g_receiveThread = CreateThread(nullptr, 0, ReceiveThreadProc, nullptr, 0, nullptr);
-    Log("initialized (freshness %.0fms, stall %.0fms, smoothAlpha %.2f, clamp %.0f, diag %d)", freshnessMs, g_stallMs, g_smoothAlpha, g_clampMax, g_diag ? 1 : 0);
+    if (g_receiveThread) {
+        SetThreadPriority(g_receiveThread, THREAD_PRIORITY_ABOVE_NORMAL);
+    }
+    Log("initialized (raw passthrough, diag %d)", g_diag ? 1 : 0);
 }
 
 MOUSE_SUPPORT_API void MouseSupport_Shutdown(void) {
@@ -409,9 +398,9 @@ MOUSE_SUPPORT_API int MouseSupport_PollFrame(MouseSupportFrame* out) {
 
     const long long now = NowMicros();
     mousesupport::ConsumeResult r;
-    AcquireSRWLockExclusive(&g_lock);
-    g_mailbox.consume(now, g_freshnessMicros, g_clampMax, r);
-    ReleaseSRWLockExclusive(&g_lock);
+    AcquireSRWLockExclusive(&g_mailboxLock);
+    g_mailbox.consume(now, r);
+    ReleaseSRWLockExclusive(&g_mailboxLock);
 
     out->dx = r.dx;
     out->dy = r.dy;
@@ -420,21 +409,19 @@ MOUSE_SUPPORT_API int MouseSupport_PollFrame(MouseSupportFrame* out) {
     out->absoluteWindow = r.absoluteWindow ? 1 : 0;
     out->absX = r.absX;
     out->absY = r.absY;
-    out->buttonCount = r.buttonCount;
-    for (int i = 0; i < r.buttonCount && i < MOUSE_SUPPORT_MAX_BUTTONS; ++i) {
+    int buttonCount = r.buttonCount;
+    if (buttonCount > MOUSE_SUPPORT_MAX_BUTTONS) buttonCount = MOUSE_SUPPORT_MAX_BUTTONS;
+    out->buttonCount = buttonCount;
+    for (int i = 0; i < buttonCount; ++i) {
         out->buttons[i].button = r.buttons[i].button;
         out->buttons[i].action = r.buttons[i].action;
     }
 
     if (g_diag) {
         const double gapMs = (double)(now - g_lastConsumeMicros) / 1000.0;
-        const double ageMs = r.appliedAgeMicros / 1000.0;
         if (gapMs > 100.0) {
-            DiagLog("STALL-RESUME gap=%.1fms appliedAgeOldest=%.1fms emitted=(%.2f,%.2f) fresh=%d droppedStale=%d droppedMotion=(%.1f,%.1f) ring=%d clamp=%d bucket=%s",
-                gapMs, ageMs, r.dx, r.dy, r.freshSamples, r.droppedSamples, r.droppedDx, r.droppedDy, r.ringDepthAtConsume, r.clamped ? 1 : 0, GapBucket(gapMs));
-        } else {
-            DiagLog("consume gap=%.1fms applied=(%.2f,%.2f) ageOldest=%.1fms fresh=%d droppedStale=%d droppedMotion=(%.1f,%.1f) ring=%d clamp=%d bucket=%s",
-                gapMs, r.dx, r.dy, ageMs, r.freshSamples, r.droppedSamples, r.droppedDx, r.droppedDy, r.ringDepthAtConsume, r.clamped ? 1 : 0, GapBucket(gapMs));
+            DiagLog("STALL-RESUME gap=%.1fms oldestPending=%.1fms emitted=(%.3f,%.3f) samples=%d bucket=%s",
+                gapMs, r.appliedAgeMicros / 1000.0, r.dx, r.dy, r.sampleCount, GapBucket(gapMs));
         }
     }
     g_lastConsumeMicros = now;
@@ -443,13 +430,13 @@ MOUSE_SUPPORT_API int MouseSupport_PollFrame(MouseSupportFrame* out) {
 
 MOUSE_SUPPORT_API void MouseSupport_SetHostState(const MouseSupportHostState* state) {
     if (!state) return;
-    AcquireSRWLockExclusive(&g_lock);
+    AcquireSRWLockExclusive(&g_stateLock);
     if (state->cursorMode != g_host.cursorMode) {
         g_pendingMode = state->cursorMode;
         g_modeChangeTime = GetTickCount64();
     }
     g_host = *state;
-    ReleaseSRWLockExclusive(&g_lock);
+    ReleaseSRWLockExclusive(&g_stateLock);
 }
 
 MOUSE_SUPPORT_API void MouseSupport_SendCursorSync(double x, double y) {
@@ -470,10 +457,10 @@ MOUSE_SUPPORT_API void MouseSupport_UpdateOverlay(double menuCursorX, double men
         if (g_overlaySocket == INVALID_SOCKET) return;
     }
     int windowWidth, windowHeight;
-    AcquireSRWLockShared(&g_lock);
+    AcquireSRWLockShared(&g_stateLock);
     windowWidth = g_host.windowWidth;
     windowHeight = g_host.windowHeight;
-    ReleaseSRWLockShared(&g_lock);
+    ReleaseSRWLockShared(&g_stateLock);
 
     sockaddr_in addr = {};
     addr.sin_family = AF_INET;
@@ -492,7 +479,7 @@ MOUSE_SUPPORT_API unsigned int MouseSupport_LastActivityTickMs(void) {
 }
 
 MOUSE_SUPPORT_API double MouseSupport_SmoothingMs(void) {
-    return (double)g_freshnessMicros / 1000.0;
+    return 0.0;
 }
 
 }
