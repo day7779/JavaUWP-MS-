@@ -1206,6 +1206,22 @@ bool RunEmbeddedMinecraft(const std::wstring& exeDir,
         WriteLogF(L"LWJGL OpenGL library override missing: %s", selectedOpenGl.c_str());
     }
     WriteLogF(L"Log4j configuration: %s", FileUriFromPath(logConfigPath).c_str());
+    if (loaderId == LoaderId::Fabric) {
+        const std::wstring relayMicName = L"relay-mic.jar";
+        const std::wstring localRelayMic = exeDir + L"\\" + relayMicName;
+        const std::wstring packagedRelayMic = packageDir + L"\\" + relayMicName;
+        const std::wstring relayMic =
+            GetFileAttributesW(localRelayMic.c_str()) != INVALID_FILE_ATTRIBUTES
+                ? localRelayMic
+                : packagedRelayMic;
+        if (GetFileAttributesW(relayMic.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            if (!effectiveClassPath.empty()) effectiveClassPath += L";";
+            effectiveClassPath += relayMic;
+            WriteLogF(L"Relay microphone jar enabled: %s", relayMic.c_str());
+        } else {
+            WriteLogF(L"Relay microphone jar missing: %s", relayMic.c_str());
+        }
+    }
     vmOptionStorage.push_back("-Djava.class.path=" + w2a(effectiveClassPath));
     if (loaderId == LoaderId::Forge) {
         vmOptionStorage.push_back("-DlegacyClassPath=" + w2a(effectiveClassPath));

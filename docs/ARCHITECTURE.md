@@ -160,6 +160,10 @@ To add another Forge target:
 
 Xbox UWP does not expose a real mouse, so mouse input comes from an optional relay. `mouse_support.dll` (built from `mouse_support/`) is the single mouse source: it owns the UDP listener and exposes frames through a small C API. The GLFW shim links it for in game mouse input, and the launcher loads it through `ui/launcher_mouse` to drive the cursor in menus and the mod browser. Input can come from the native Bandit Mouse Relay app in `tools/mouse-relay/` (Windows and Android, UDP `7331`) or from `net/web_relay_server`, which serves a browser touchpad on port `6090` so any phone or PC can relay without installing an app.
 
+## Mic Relay
+
+Xbox UWP has no usable capture device for the in game JVM: it runs headless with a patched `java.desktop`, and the native `javax.sound.sampled` providers do not load in the sandbox, so Simple Voice Chat sees an empty microphone list. `mic_relay/` builds `relay-mic.jar`, a pure Java `javax.sound.sampled` service provider (a `MixerProvider` exposing one virtual `TargetDataLine`) with no driver and no native code. `launch/minecraft_launch` adds the jar to the Fabric game classpath so the JVM `AudioSystem` enumerates it and Simple Voice Chat can select `Bandit Relay Microphone`. Audio arrives as UDP on `7340` from the companion sender in `tools/mic-relay/` (a phone or PC), the same shape as the mouse relay. Format is 48 kHz mono signed 16-bit; the line blocks briefly and fills silence on underrun so voice chat never stalls.
+
 ## Build Time vs Runtime Configuration
 
 At build time, `build.ps1` generates `runtime_config.h` from `MC.Xbox/runtime_config.h.in` using values from `scripts/config.ps1` and CLI overrides. That header supplies default package versions to host modules.

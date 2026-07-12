@@ -971,6 +971,34 @@ function Build-JavaDesktopUwpAwtPatch {
     Write-Host "Java desktop UWP AWT patch: $OutputJar"
 }
 
+function Build-MicRelayJar {
+    param(
+        [Parameter(Mandatory = $true)][string]$JavaHome,
+        [Parameter(Mandatory = $true)][string]$OutputJar
+    )
+
+    Write-Host "Building relay microphone jar: $OutputJar"
+    $javacExe = Join-Path $JavaHome "bin\javac.exe"
+    if (-not (Test-Path $javacExe)) { throw "javac.exe not found at $javacExe; relay-mic jar requires a JDK, not a JRE." }
+    $micJarExe = Join-Path $JavaHome "bin\jar.exe"
+    if (-not (Test-Path $micJarExe)) { $micJarExe = $jarExe }
+    $micSrc = Join-Path $root "mic_relay\src\main\java"
+    $micRes = Join-Path $root "mic_relay\src\main\resources"
+    $micWork = Join-Path $buildDir "mic_relay"
+    $micClasses = Join-Path $micWork "classes"
+    Remove-Item -Recurse -Force $micWork -ErrorAction SilentlyContinue
+    New-Item -ItemType Directory -Force -Path $micClasses | Out-Null
+    $micSources = Get-ChildItem -Recurse -Filter *.java $micSrc | ForEach-Object { $_.FullName }
+    & $javacExe --release 17 -d $micClasses $micSources
+    if ($LASTEXITCODE -ne 0) { throw "relay-mic compile failed" }
+    Copy-Item -Recurse -Force (Join-Path $micRes "*") $micClasses
+    Push-Location $micClasses
+    & $micJarExe cf $OutputJar .
+    Pop-Location
+    if ($LASTEXITCODE -ne 0) { throw "relay-mic jar creation failed" }
+    Write-Host "Relay microphone jar: $OutputJar"
+}
+
 function Resolve-SecureJarHandlerJar {
     param([Parameter(Mandatory = $true)][string]$Version)
 
@@ -1049,6 +1077,7 @@ Build-JavaZipfsRealpathPatch -JavaHome $jre21Src -OutputJar (Join-Path $pkg "jav
 Build-JavaDesktopUwpAwtPatch -JavaHome $jreSrc -OutputJar (Join-Path $pkg "java-desktop-uwp-awt.jar") -WorkName "java_desktop_uwp_awt_patch_current"
 Build-JavaDesktopUwpAwtPatch -JavaHome $jre21Src -OutputJar (Join-Path $pkg "java-desktop-uwp-awt-21.jar") -WorkName "java_desktop_uwp_awt_patch_21"
 Build-SecureJarHandlerUwpPatch -JavaHome $jre21Src -Version "3.0.8" -OutputJar (Join-Path $pkg "securejarhandler-uwp-patch.jar")
+Build-MicRelayJar -JavaHome $jre21Src -OutputJar (Join-Path $pkg "relay-mic.jar")
 
 Write-Host "Generating UWP tile assets..."
 & $pythonExe (Join-Path $root "scripts\generate-assets.py") $pkg
