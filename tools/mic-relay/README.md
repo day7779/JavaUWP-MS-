@@ -15,10 +15,13 @@ This tool does not launch Minecraft and does not handle account auth or entitlem
 
 ```
 pip install sounddevice
+python relay_mic.py --list-devices          # see input devices
 python relay_mic.py --host <xbox-ip> --port 7340 --frame-ms 10
 ```
 
-- `--device` selects an input by name or index (default: system default input).
+- `--device` selects an input by name or index (default: system default input). While running, an
+  on-screen level bar shows the captured input; if it stays flat while you talk, the default device
+  is wrong or muted - pick the right one with `--device`.
 - On the console, open Simple Voice Chat settings and pick `Bandit Relay Microphone`.
 - Fabric targets load the provider from the launcher classpath. Forge and NeoForge targets
   load it from the bundled `bandit_mic_relay` mod that the launcher syncs into the profile

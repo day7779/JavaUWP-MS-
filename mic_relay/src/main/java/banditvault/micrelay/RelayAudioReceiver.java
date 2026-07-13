@@ -25,6 +25,7 @@ final class RelayAudioReceiver {
     private long dropped;
     private long seqGaps;
     private long lastSeq = -1;
+    private int peak;
 
     private RelayAudioReceiver(int port) {
         this.port = port;
@@ -60,6 +61,7 @@ final class RelayAudioReceiver {
             dropped = 0;
             seqGaps = 0;
             lastSeq = -1;
+            peak = 0;
             DatagramSocket active = created;
             Thread thread = new Thread(() -> receiveLoop(active), "bandit-mic-relay-" + port);
             thread.setDaemon(true);
@@ -92,7 +94,7 @@ final class RelayAudioReceiver {
             }
             buffer.clear();
             MicRelayLog.log("stopped mic relay on udp " + port + " (packets=" + received
-                    + " dropped=" + dropped + " seq-gaps=" + seqGaps + ")");
+                    + " dropped=" + dropped + " seq-gaps=" + seqGaps + " peak=" + peak + "/32767)");
         }
     }
 
@@ -145,11 +147,22 @@ final class RelayAudioReceiver {
         lastSeq = seq;
         received++;
         if (payload > 0) {
+            int framePeak = 0;
+            for (int i = HEADER_SIZE; i + 1 < HEADER_SIZE + payload; i += 2) {
+                int sample = (short) ((data[i] & 0xFF) | (data[i + 1] << 8));
+                int magnitude = Math.abs(sample);
+                if (magnitude > framePeak) {
+                    framePeak = magnitude;
+                }
+            }
+            if (framePeak > peak) {
+                peak = framePeak;
+            }
             buffer.write(data, HEADER_SIZE, payload);
         }
         if ((received % 1000) == 0) {
             MicRelayLog.debug("mic relay stats: packets=" + received + " dropped=" + dropped
-                    + " seq-gaps=" + seqGaps + " buffered=" + buffer.available());
+                    + " seq-gaps=" + seqGaps + " buffered=" + buffer.available() + " peak=" + peak);
         }
     }
 
