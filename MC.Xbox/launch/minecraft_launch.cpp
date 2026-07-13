@@ -905,6 +905,13 @@ done:
     }
 }
 
+// not declared for the uwp api family; present in kernel32 on dev mode
+extern "C" {
+WINBASEAPI HANDLE WINAPI CreateJobObjectW(LPSECURITY_ATTRIBUTES lpJobAttributes, LPCWSTR lpName);
+WINBASEAPI BOOL WINAPI AssignProcessToJobObject(HANDLE hJob, HANDLE hProcess);
+WINBASEAPI BOOL WINAPI SetInformationJobObject(HANDLE hJob, JOBOBJECTINFOCLASS JobObjectInformationClass, LPVOID lpJobObjectInformation, DWORD cbJobObjectInformationLength);
+}
+
 namespace
 {
     HANDLE gAudioRelayJob = nullptr;
