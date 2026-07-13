@@ -1001,6 +1001,7 @@ function Build-MicRelayJar {
 
     Copy-Item -Force (Join-Path $root "mic_relay\modmeta\mods.toml") (Join-Path $micClasses "META-INF\mods.toml")
     Copy-Item -Force (Join-Path $root "mic_relay\modmeta\neoforge.mods.toml") (Join-Path $micClasses "META-INF\neoforge.mods.toml")
+    Copy-Item -Force (Join-Path $root "mic_relay\modmeta\pack.mcmeta") (Join-Path $micClasses "pack.mcmeta")
     Push-Location $micClasses
     & $micJarExe cf $OutputModJar .
     Pop-Location
