@@ -974,7 +974,8 @@ function Build-JavaDesktopUwpAwtPatch {
 function Build-MicRelayJar {
     param(
         [Parameter(Mandatory = $true)][string]$JavaHome,
-        [Parameter(Mandatory = $true)][string]$OutputJar
+        [Parameter(Mandatory = $true)][string]$OutputJar,
+        [Parameter(Mandatory = $true)][string]$OutputModJar
     )
 
     Write-Host "Building relay microphone jar: $OutputJar"
@@ -997,6 +998,14 @@ function Build-MicRelayJar {
     Pop-Location
     if ($LASTEXITCODE -ne 0) { throw "relay-mic jar creation failed" }
     Write-Host "Relay microphone jar: $OutputJar"
+
+    Copy-Item -Force (Join-Path $root "mic_relay\modmeta\mods.toml") (Join-Path $micClasses "META-INF\mods.toml")
+    Copy-Item -Force (Join-Path $root "mic_relay\modmeta\neoforge.mods.toml") (Join-Path $micClasses "META-INF\neoforge.mods.toml")
+    Push-Location $micClasses
+    & $micJarExe cf $OutputModJar .
+    Pop-Location
+    if ($LASTEXITCODE -ne 0) { throw "relay-mic mod jar creation failed" }
+    Write-Host "Relay microphone mod jar: $OutputModJar"
 }
 
 function Resolve-SecureJarHandlerJar {
@@ -1077,7 +1086,32 @@ Build-JavaZipfsRealpathPatch -JavaHome $jre21Src -OutputJar (Join-Path $pkg "jav
 Build-JavaDesktopUwpAwtPatch -JavaHome $jreSrc -OutputJar (Join-Path $pkg "java-desktop-uwp-awt.jar") -WorkName "java_desktop_uwp_awt_patch_current"
 Build-JavaDesktopUwpAwtPatch -JavaHome $jre21Src -OutputJar (Join-Path $pkg "java-desktop-uwp-awt-21.jar") -WorkName "java_desktop_uwp_awt_patch_21"
 Build-SecureJarHandlerUwpPatch -JavaHome $jre21Src -Version "3.0.8" -OutputJar (Join-Path $pkg "securejarhandler-uwp-patch.jar")
-Build-MicRelayJar -JavaHome $jre21Src -OutputJar (Join-Path $pkg "relay-mic.jar")
+$micRelayModJar = Join-Path (Join-Path $buildDir "mic_relay") "bandit_mic_relay-1.0.0.jar"
+Build-MicRelayJar -JavaHome $jre21Src -OutputJar (Join-Path $pkg "relay-mic.jar") -OutputModJar $micRelayModJar
+if (-not $SkipVersionCompat) {
+    $micVersionModsRoot = Join-Path $pkg "runtime\version-mods"
+    foreach ($row in $forgeTargets) {
+        $mcMinor = 0
+        $mcParts = "$($row.minecraftVersion)".Split('.')
+        if ($mcParts.Length -ge 2) { $mcMinor = [int]$mcParts[1] }
+        if ($row.javaRuntime -eq "legacy" -or $mcMinor -lt 19) {
+            Write-Host "Skipping mic relay mod for $($row.minecraftVersion) forge: loader too old for lowcodefml"
+            continue
+        }
+        $targetId = "$($row.minecraftVersion)-forge-$($row.loaderVersion)"
+        $outDir = Join-Path $micVersionModsRoot $targetId
+        New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+        Copy-Item -Force $micRelayModJar (Join-Path $outDir "bandit_mic_relay-1.0.0.jar")
+        Write-Host "Bundled mic relay mod for ${targetId}"
+    }
+    foreach ($row in $neoForgeTargets) {
+        $targetId = "$($row.minecraftVersion)-neoforge-$($row.loaderVersion)"
+        $outDir = Join-Path $micVersionModsRoot $targetId
+        New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+        Copy-Item -Force $micRelayModJar (Join-Path $outDir "bandit_mic_relay-1.0.0.jar")
+        Write-Host "Bundled mic relay mod for ${targetId}"
+    }
+}
 
 Write-Host "Generating UWP tile assets..."
 & $pythonExe (Join-Path $root "scripts\generate-assets.py") $pkg

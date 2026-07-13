@@ -20,6 +20,9 @@ python relay_mic.py --host <xbox-ip> --port 7340 --frame-ms 10
 
 - `--device` selects an input by name or index (default: system default input).
 - On the console, open Simple Voice Chat settings and pick `Bandit Relay Microphone`.
+- Fabric targets load the provider from the launcher classpath. Forge and NeoForge targets
+  load it from the bundled `bandit_mic_relay` mod that the launcher syncs into the profile
+  `mods/` folder; no manual install is needed on either loader.
 
 A browser page can not be used as the sender: `getUserMedia` needs a secure context, and
 the console relay is served over plain HTTP on the LAN. Use this native sender instead.
