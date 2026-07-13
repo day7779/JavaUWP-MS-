@@ -382,7 +382,6 @@ def main():
                                 blocksize=0,
                                 device=output_device,
                                 callback=output_callback,
-                                start=False,
                             )
 
                             stream.start()
