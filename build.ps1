@@ -331,6 +331,11 @@ Write-Host "=== Building mouse support DLL ==="
 & (Join-Path $root "mouse_support\build_mouse_support.ps1") -OutputDir $mouseSupportBuildDir
 if (-not (Test-Path $mouseSupportDll)) { throw "mouse_support DLL missing after build: $mouseSupportDll" }
 
+$audioRelayBuildDir = Join-Path $buildDir "audio_relay"
+& (Join-Path $root "audio_relay\build_audio_relay.ps1") -OutputDir $audioRelayBuildDir
+$audioRelayExe = Join-Path $audioRelayBuildDir "audio_relay.exe"
+if (-not (Test-Path $audioRelayExe)) { throw "audio_relay exe missing after build: $audioRelayExe" }
+
 Write-Host "=== Building GLFW CoreWindow shim ==="
 & (Join-Path $root "glfw_shim\build_glfw.ps1") -OutputDir $glfwBuildDir -MouseSupportLib $mouseSupportLib -MouseSupportInclude (Join-Path $root "mouse_support")
 if (-not (Test-Path $shimDll)) { throw "GLFW shim DLL missing after build: $shimDll" }
@@ -569,6 +574,7 @@ Write-Host "Copying GLFW shim..."
 Copy-Item $shimDll (Join-Path $pkg "natives\glfw.dll") -Force
 Copy-Item $mouseSupportDll (Join-Path $pkg "mouse_support.dll") -Force
 Copy-Item $mouseSupportDll (Join-Path $pkg "natives\mouse_support.dll") -Force
+Copy-Item $audioRelayExe (Join-Path $pkg "audio_relay.exe") -Force
 
 Write-Host "Copying Mesa runtime..."
 $mesaRuntime = Resolve-MesaRuntimeDir -MesaRuntimeDir $MesaRuntimeDir
