@@ -13,8 +13,9 @@ import javax.sound.sampled.TargetDataLine;
 
 final class RelayMixer implements Mixer {
     static final Mixer.Info INFO = new RelayMixerInfo();
-    static final DataLine.Info TARGET_LINE_INFO =
-            new DataLine.Info(TargetDataLine.class, RelayTargetDataLine.FORMAT);
+    static final DataLine.Info TARGET_LINE_INFO = new DataLine.Info(
+            TargetDataLine.class, RelayTargetDataLine.SUPPORTED_FORMATS,
+            2, javax.sound.sampled.AudioSystem.NOT_SPECIFIED);
 
     private static final RelayMixer INSTANCE = new RelayMixer();
     private static final Line.Info MIXER_LINE_INFO = new Line.Info(Mixer.class);

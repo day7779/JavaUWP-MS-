@@ -16,6 +16,16 @@ import javax.sound.sampled.TargetDataLine;
 final class RelayTargetDataLine implements TargetDataLine {
     static final AudioFormat FORMAT = new AudioFormat(48000.0f, 16, 1, true, false);
 
+    // the relay stream is 48 kHz; every rate here divides it evenly so capture
+    // clients like speech-to-text mods (16 kHz) get clean integer decimation
+    static final AudioFormat[] SUPPORTED_FORMATS = {
+        FORMAT,
+        new AudioFormat(24000.0f, 16, 1, true, false),
+        new AudioFormat(16000.0f, 16, 1, true, false),
+        new AudioFormat(12000.0f, 16, 1, true, false),
+        new AudioFormat(8000.0f, 16, 1, true, false),
+    };
+
     private static final int FRAME_SIZE = 2;
     private static final Control[] NO_CONTROLS = new Control[0];
 
@@ -27,13 +37,15 @@ final class RelayTargetDataLine implements TargetDataLine {
     private volatile boolean open;
     private volatile boolean running;
     private volatile int bufferSize = RelayConfig.bufferBytes();
+    private volatile int decimation = 1;
+    private volatile AudioFormat openFormat = FORMAT;
+    private byte[] sourceScratch;
 
     static boolean isFormatCompatible(AudioFormat format) {
         if (format == null || !AudioFormat.Encoding.PCM_SIGNED.equals(format.getEncoding())) {
             return false;
         }
-        if (!matches(format.getSampleRate(), FORMAT.getSampleRate())
-                || !matches(format.getFrameRate(), FORMAT.getFrameRate())) {
+        if (!rateSupported(format.getSampleRate()) || !rateSupported(format.getFrameRate())) {
             return false;
         }
         if (!matches(format.getSampleSizeInBits(), FORMAT.getSampleSizeInBits())
@@ -44,12 +56,20 @@ final class RelayTargetDataLine implements TargetDataLine {
         return !format.isBigEndian();
     }
 
-    private static boolean matches(int requested, int actual) {
-        return requested == AudioSystem.NOT_SPECIFIED || requested == actual;
+    private static boolean rateSupported(float rate) {
+        if (rate == AudioSystem.NOT_SPECIFIED) {
+            return true;
+        }
+        for (AudioFormat supported : SUPPORTED_FORMATS) {
+            if (Float.compare(rate, supported.getSampleRate()) == 0) {
+                return true;
+            }
+        }
+        return false;
     }
 
-    private static boolean matches(float requested, float actual) {
-        return requested == AudioSystem.NOT_SPECIFIED || Float.compare(requested, actual) == 0;
+    private static boolean matches(int requested, int actual) {
+        return requested == AudioSystem.NOT_SPECIFIED || requested == actual;
     }
 
     @Override
@@ -67,21 +87,33 @@ final class RelayTargetDataLine implements TargetDataLine {
         if (!isFormatCompatible(format)) {
             throw new LineUnavailableException("unsupported format: " + format);
         }
+        int requestedRate = (int) FORMAT.getSampleRate();
+        if (format != null && format.getSampleRate() != AudioSystem.NOT_SPECIFIED) {
+            requestedRate = (int) format.getSampleRate();
+        }
         boolean fireOpen = false;
         synchronized (stateLock) {
-            if (!open) {
-                RelayAudioReceiver attached = RelayAudioReceiver.forPort(RelayConfig.port());
-                attached.attach();
-                receiver = attached;
-                bufferSize = RelayConfig.bufferBytes();
-                framePosition.set(0L);
-                running = false;
-                open = true;
-                fireOpen = true;
+            if (open) {
+                if (requestedRate != (int) openFormat.getSampleRate()) {
+                    throw new LineUnavailableException(
+                            "capture line already open at " + (int) openFormat.getSampleRate() + " Hz");
+                }
+                return;
             }
+            RelayAudioReceiver attached = RelayAudioReceiver.forPort(RelayConfig.port());
+            attached.attach();
+            receiver = attached;
+            decimation = (int) FORMAT.getSampleRate() / requestedRate;
+            openFormat = new AudioFormat(requestedRate, 16, 1, true, false);
+            bufferSize = RelayConfig.bufferBytes() / decimation;
+            framePosition.set(0L);
+            running = false;
+            open = true;
+            fireOpen = true;
         }
         if (fireOpen) {
-            MicRelayLog.log("capture line opened (udp " + RelayConfig.port() + ")");
+            MicRelayLog.log("capture line opened at " + requestedRate + " Hz (udp "
+                    + RelayConfig.port() + ", decimation " + decimation + ")");
             fire(LineEvent.Type.OPEN);
         }
     }
@@ -125,6 +157,35 @@ final class RelayTargetDataLine implements TargetDataLine {
         if (length == 0 || !running) {
             return 0;
         }
+        int factor = decimation;
+        if (factor <= 1) {
+            fillFromRing(data, offset, length);
+            framePosition.addAndGet(length / FRAME_SIZE);
+            return length;
+        }
+        int sourceLength = length * factor;
+        byte[] source = sourceScratch;
+        if (source == null || source.length < sourceLength) {
+            source = new byte[sourceLength];
+            sourceScratch = source;
+        }
+        fillFromRing(source, 0, sourceLength);
+        for (int out = 0; out < length; out += FRAME_SIZE) {
+            int base = out * factor;
+            int accumulated = 0;
+            for (int sample = 0; sample < factor; ++sample) {
+                int index = base + sample * FRAME_SIZE;
+                accumulated += (short) ((source[index] & 0xFF) | (source[index + 1] << 8));
+            }
+            short value = (short) (accumulated / factor);
+            data[offset + out] = (byte) value;
+            data[offset + out + 1] = (byte) (value >> 8);
+        }
+        framePosition.addAndGet(length / FRAME_SIZE);
+        return length;
+    }
+
+    private void fillFromRing(byte[] destination, int offset, int length) {
         RelayAudioReceiver current = receiver;
         int copied = 0;
         if (current != null) {
@@ -132,7 +193,7 @@ final class RelayTargetDataLine implements TargetDataLine {
             long deadlineNanos = System.nanoTime() + RelayConfig.underrunMs() * 1_000_000L;
             while (copied < length && running) {
                 long remainingMs = (deadlineNanos - System.nanoTime()) / 1_000_000L;
-                int count = ring.read(data, offset + copied, length - copied,
+                int count = ring.read(destination, offset + copied, length - copied,
                         remainingMs > 0 ? (int) remainingMs : 0);
                 if (count <= 0) {
                     break;
@@ -141,10 +202,8 @@ final class RelayTargetDataLine implements TargetDataLine {
             }
         }
         if (copied < length) {
-            Arrays.fill(data, offset + copied, offset + length, (byte) 0);
+            Arrays.fill(destination, offset + copied, offset + length, (byte) 0);
         }
-        framePosition.addAndGet(length / FRAME_SIZE);
-        return length;
     }
 
     @Override
@@ -175,7 +234,7 @@ final class RelayTargetDataLine implements TargetDataLine {
 
     @Override
     public AudioFormat getFormat() {
-        return FORMAT;
+        return openFormat;
     }
 
     @Override
@@ -189,7 +248,7 @@ final class RelayTargetDataLine implements TargetDataLine {
         if (current == null) {
             return 0;
         }
-        return current.buffer().available() & ~(FRAME_SIZE - 1);
+        return (current.buffer().available() / decimation) & ~(FRAME_SIZE - 1);
     }
 
     @Override
@@ -205,9 +264,10 @@ final class RelayTargetDataLine implements TargetDataLine {
     @Override
     public long getMicrosecondPosition() {
         long frames = framePosition.get();
-        long seconds = frames / 48000L;
-        long remainder = frames % 48000L;
-        return seconds * 1_000_000L + remainder * 1_000_000L / 48000L;
+        long rate = (long) openFormat.getSampleRate();
+        long seconds = frames / rate;
+        long remainder = frames % rate;
+        return seconds * 1_000_000L + remainder * 1_000_000L / rate;
     }
 
     @Override
@@ -244,6 +304,8 @@ final class RelayTargetDataLine implements TargetDataLine {
             open = false;
             detached = receiver;
             receiver = null;
+            decimation = 1;
+            openFormat = FORMAT;
             fireClose = true;
         }
         if (fireStop) {
