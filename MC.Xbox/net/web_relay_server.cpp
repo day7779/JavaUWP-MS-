@@ -75,7 +75,12 @@ header{display:flex;align-items:center;justify-content:space-between;
 #pad .hint b{color:var(--text);display:block;font-size:17px;margin-bottom:6px;}
 #pad .hint i{display:block;font-size:12px;font-style:normal;color:#55606f;margin-top:8px;}
 #pad.live{border-color:var(--accent);}
+#pad.warn{border-color:#d9a441;box-shadow:inset 0 0 0 1px #d9a44166;}
+#pad.needlock{border-color:var(--accent2);box-shadow:inset 0 0 0 1px var(--accent2);}
+#pad.needlock .hint i{color:var(--accent2);font-weight:600;}
 #pad.touching .hint{opacity:0;}
+#evt{display:none;margin:0 calc(14px + env(safe-area-inset-right)) 10px calc(14px + env(safe-area-inset-left));padding:9px 11px;border-radius:10px;background:#2a1d0c;border:1px solid #4a3410;color:#d9a441;font-size:11.5px;line-height:1.45;font-variant-numeric:tabular-nums;}
+#evt.show{display:block;}
 .controls{display:flex;flex-direction:column;gap:8px;
   padding:0 calc(14px + env(safe-area-inset-right)) calc(14px + env(safe-area-inset-bottom)) calc(14px + env(safe-area-inset-left));}
 .row{display:flex;gap:8px;}
@@ -100,8 +105,9 @@ header{padding:calc(8px + env(safe-area-inset-top)) calc(16px + env(safe-area-in
   <div class="hdr-right"><span id="stats"></span><span id="mode">--</span><span id="statetext">connecting</span><span class="dot" id="dot"></span></div>
 </header>
 <div class="stage">
-<div id="pad"><div class="hint"><b>Touchpad</b>Drag to move<i>External mouse works too. Tap once to lock the pointer where supported.</i></div></div>
+<div id="pad"><div class="hint"><b>Touchpad</b>Drag to move<i id="hint2">External mouse works too.</i></div></div>
 <div class="controls">
+  <div id="evt"></div>
   <div class="row">
     <button class="btn wide" id="bl">Left</button>
     <button class="btn" id="bm">Middle</button>
@@ -134,13 +140,19 @@ header{padding:calc(8px + env(safe-area-inset-top)) calc(16px + env(safe-area-in
   function clamp(v,lo,hi){return v<lo?lo:(v>hi?hi:v);}
 
   var ws=null,wsOpen=false,backoff=250,rtt=null,rttPeak=0,tx=0,smp=0;
-  var ticks=0,worstGap=0,peakBuf=0,drops=0;
+  var ticks=0,worstGap=0,peakBuf=0,holds=0;
+  var evtEl=document.getElementById('evt');
+  var evtCount=0,evtWorst=null,bestTx=0,warnUntil=0,startT=performance.now();
+  evtEl.addEventListener('pointerdown',function(e){
+    e.preventDefault();evtCount=0;evtWorst=null;bestTx=0;
+    evtEl.className='';evtEl.textContent='';
+  },{passive:false});
 
   function connect(){
     var proto=(location.protocol==='https:')?'wss://':'ws://';
     try{ws=new WebSocket(proto+location.host+'/ws');}catch(e){setTimeout(connect,backoff);return;}
     ws.binaryType='arraybuffer';
-    ws.onopen=function(){wsOpen=true;backoff=250;setLive(true);statetext.textContent=captured?'pointer locked':'connected';};
+    ws.onopen=function(){wsOpen=true;backoff=250;setLive(true);statetext.textContent=captured?'mouse captured':'connected';};
     ws.onclose=function(){wsOpen=false;setLive(false);statetext.textContent='reconnecting';
       modeEl.textContent='--';modeEl.className='';
       setTimeout(connect,backoff);backoff=Math.min(backoff*2,4000);};
@@ -151,10 +163,13 @@ header{padding:calc(8px + env(safe-area-inset-top)) calc(16px + env(safe-area-in
       if(t===PKT_PING&&ev.data.byteLength>=5){
         var s=((performance.now()|0)-v.getUint32(1,true));
         if(s>=0&&s<5000){rtt=(rtt===null)?s:(rtt*0.7+s*0.3);if(s>rttPeak)rttPeak=s;}
-      }else if(t===PKT_MODE){
+      }else if(t===PKT_MODE&&ev.data.byteLength>=10){
         menuMode=v.getUint8(1)===1;
+        winW=v.getUint16(2,true);winH=v.getUint16(4,true);
+        menuW=v.getUint16(6,true);menuH=v.getUint16(8,true);
         modeEl.textContent=menuMode?'MENU':'GAME';
         modeEl.className=menuMode?'menu':'game';
+        refreshScale();
       }
     };
   }
@@ -167,7 +182,7 @@ header{padding:calc(8px + env(safe-area-inset-top)) calc(16px + env(safe-area-in
     if(!wsOpen||ws.readyState!==1)return false;
     var b=ws.bufferedAmount;
     if(b>peakBuf)peakBuf=b;
-    if(b>4096){drops++;return false;}
+    if(b>128){holds++;return false;}
     stateV.setUint8(0,PKT_STATE);
     stateV.setInt16(1,clamp(sx,-32768,32767),true);
     stateV.setInt16(3,clamp(sy,-32768,32767),true);
@@ -180,6 +195,7 @@ header{padding:calc(8px + env(safe-area-inset-top)) calc(16px + env(safe-area-in
 
   function sendPing(){
     if(!wsOpen||ws.readyState!==1)return;
+    if(ws.bufferedAmount>0)return;
     pingV.setUint8(0,PKT_PING);
     pingV.setUint32(1,performance.now()|0,true);
     ws.send(pingBuf);
@@ -187,17 +203,53 @@ header{padding:calc(8px + env(safe-area-inset-top)) calc(16px + env(safe-area-in
 
   var OPT={passive:false};
   var pts=new Map();
-  var lastMx=null,lastMy=null;
+  var lastMx=null,lastMy=null,lockWarm=0,sawMouse=false;
+  var MAXSTEP=400;
+  var winW=1920,winH=1080,menuW=960,menuH=540;
+  var mScaleX=1,mScaleY=1;
+  var hint2=document.getElementById('hint2');
 
   function isMouse(e){return e.pointerType==='mouse'||e.pointerType==='pen';}
 
+  function refreshScale(){
+    var r=pad.getBoundingClientRect();
+    var pw=r.width>1?r.width:1,ph=r.height>1?r.height:1;
+    if(menuMode){
+      mScaleX=menuW/pw;mScaleY=menuH/ph;
+    }else{
+      var u=winW/pw;mScaleX=u;mScaleY=u;
+    }
+  }
+  window.addEventListener('resize',refreshScale);
+  window.addEventListener('orientationchange',refreshScale);
+
   var canLock=('requestPointerLock' in pad)&&('pointerLockElement' in document);
+
+  function updateHint(){
+    if(sawMouse&&canLock&&!captured){
+      hint2.textContent='Mouse detected — click the pad to capture it';
+      pad.classList.add('needlock');
+    }else if(sawMouse&&captured){
+      hint2.textContent='Mouse captured — press Esc to release';
+      pad.classList.remove('needlock');
+    }else{
+      hint2.textContent='External mouse works too.';
+      pad.classList.remove('needlock');
+    }
+  }
+
   if(canLock){
     pad.addEventListener('click',function(){if(!captured)pad.requestPointerLock();});
     document.addEventListener('pointerlockchange',function(){
       captured=(document.pointerLockElement===pad);
       lastMx=null;lastMy=null;
-      statetext.textContent=captured?'pointer locked':(wsOpen?'connected':'reconnecting');
+      lockWarm=captured?2:0;
+      pendX=0;pendY=0;
+      statetext.textContent=captured?'mouse captured':(wsOpen?'connected':'reconnecting');
+      refreshScale();updateHint();
+    });
+    document.addEventListener('pointerlockerror',function(){
+      captured=false;updateHint();
     });
   }
 
@@ -207,28 +259,31 @@ header{padding:calc(8px + env(safe-area-inset-top)) calc(16px + env(safe-area-in
   }
 
   function mouseMove(e){
+    if(!sawMouse){sawMouse=true;refreshScale();updateHint();}
+    if(canLock&&!captured)return;
     var list=subSamples(e);
     for(var i=0;i<list.length;i++){
       var s=list[i];
-      var mvx=(typeof s.movementX==='number')?s.movementX:0;
-      var mvy=(typeof s.movementY==='number')?s.movementY:0;
       var ddx=0,ddy=0;
       if(captured){
-        ddx=mvx;ddy=mvy;
+        ddx=(typeof s.movementX==='number')?s.movementX:0;
+        ddy=(typeof s.movementY==='number')?s.movementY:0;
+        if(lockWarm>0){lockWarm--;continue;}
+        if(ddx>MAXSTEP||ddx<-MAXSTEP||ddy>MAXSTEP||ddy<-MAXSTEP)continue;
       }else{
         if(lastMx===null){lastMx=s.clientX;lastMy=s.clientY;smp++;continue;}
         ddx=s.clientX-lastMx;ddy=s.clientY-lastMy;
         lastMx=s.clientX;lastMy=s.clientY;
-        if(ddx===0&&ddy===0&&(mvx||mvy)){ddx=mvx;ddy=mvy;}
       }
       smp++;
-      if(ddx||ddy){pendX+=ddx*sens;pendY+=ddy*sens;flushPending();}
+      if(ddx||ddy){pendX+=ddx*mScaleX*sens;pendY+=ddy*mScaleY*sens;flushPending();}
     }
   }
 
   function ptDown(e){
     e.preventDefault();
     if(isMouse(e)){
+      if(canLock&&!captured)return;
       setBtn(e.button,1);
       lastMx=e.clientX;lastMy=e.clientY;
       return;
@@ -340,20 +395,49 @@ header{padding:calc(8px + env(safe-area-inset-top)) calc(16px + env(safe-area-in
     var gap=now-lastTick;lastTick=now;ticks++;
     if(gap>worstGap)worstGap=gap;
     flushPending();
-    if(now-lastKeep>=700){if(sendState(0,0,0))lastKeep=now;}
+    if(now-lastKeep>=150){if(sendState(0,0,0))lastKeep=now;}
     if(now-lastPing>=500){sendPing();lastPing=now;}
+    if(warnUntil&&now>warnUntil){warnUntil=0;pad.classList.remove('warn');}
     if(now-lastStat>=1000){
       var el=now-lastStat;
+      var txR=Math.round(tx*1000/el),smpR=Math.round(smp*1000/el);
+      var gapR=Math.round(worstGap),rttR=Math.round(rttPeak);
+      if(txR>bestTx)bestTx=txR;
+
       stats.textContent=
-        (rtt===null?'--':rtt.toFixed(0)+'/'+rttPeak.toFixed(0)+'ms')+
-        ' · '+Math.round(smp*1000/el)+'smp'+
-        ' · '+Math.round(tx*1000/el)+'tx'+
+        (rtt===null?'--':rtt.toFixed(0)+'/'+rttR+'ms')+
+        ' · '+smpR+'smp'+
+        ' · '+txR+'tx'+
         ' · '+Math.round(ticks*1000/el)+'hz'+
-        ' · '+worstGap.toFixed(0)+'gap'+
+        ' · '+gapR+'gap'+
         (peakBuf>0?' · '+peakBuf+'buf':'')+
-        (drops>0?' · '+drops+'drop':'')+
+        (holds>0?' · '+holds+'hold':'')+
         (dispFps<45?' · '+dispFps.toFixed(0)+'fps':'');
-      smp=0;tx=0;ticks=0;worstGap=0;peakBuf=0;drops=0;rttPeak=0;lastStat=now;
+
+      var moving=smpR>5;
+      var bad=moving&&(
+        (bestTx>25&&txR<bestTx*0.7)||
+        holds>0||
+        peakBuf>0||
+        gapR>60||
+        (rtt!==null&&rttR>rtt*3+25));
+      if(bad){
+        evtCount++;
+        if(!evtWorst||txR<evtWorst.tx){
+          evtWorst={t:Math.round((now-startT)/1000),tx:txR,smp:smpR,
+                    gap:gapR,buf:peakBuf,hold:holds,rtt:rttR};
+        }
+        pad.classList.add('warn');warnUntil=now+900;
+      }
+      if(evtCount){
+        var w=evtWorst;
+        evtEl.textContent=evtCount+(evtCount>1?' stalls':' stall')+
+          ' · worst at '+w.t+'s: '+w.tx+'tx of '+bestTx+
+          ' · '+w.smp+'smp · '+w.gap+'gap · '+w.buf+'buf · '+
+          w.hold+'hold · '+w.rtt+'ms peak   (tap to clear)';
+        evtEl.className='show';
+      }
+      smp=0;tx=0;ticks=0;worstGap=0;peakBuf=0;holds=0;rttPeak=0;lastStat=now;
     }
   }
   setInterval(tick,TICK_MS);
@@ -367,6 +451,7 @@ header{padding:calc(8px + env(safe-area-inset-top)) calc(16px + env(safe-area-in
   requestAnimationFrame(rafProbe);
 
   if('wakeLock' in navigator){navigator.wakeLock.request('screen').catch(function(){});}
+  refreshScale();updateHint();
   connect();
 })();
 </script>
@@ -476,6 +561,11 @@ bool SendFrame(SOCKET s, unsigned char opcode, const void* data, size_t len) {
 
 inline short RdI16(const unsigned char* p) {
     return (short)((unsigned short)p[0] | ((unsigned short)p[1] << 8));
+}
+
+inline void WrU16(unsigned char* p, unsigned short v) {
+    p[0] = (unsigned char)(v & 0xFF);
+    p[1] = (unsigned char)(v >> 8);
 }
 
 inline double Clamp(double v, double lo, double hi) {
@@ -716,8 +806,24 @@ private:
         if (n > 0) sendto(udp_, out, n, 0, (const sockaddr*)&udpDst_, sizeof(udpDst_));
     }
 
+    void FillModePacket(unsigned char* pkt) {
+        pkt[0] = kPktMode;
+        pkt[1] = (unsigned char)(menuMode_ ? 1 : 0);
+        WrU16(pkt + 2, (unsigned short)winW_);
+        WrU16(pkt + 4, (unsigned short)winH_);
+        WrU16(pkt + 6, (unsigned short)menuW_);
+        WrU16(pkt + 8, (unsigned short)menuH_);
+    }
+
+    void SendModeTo(SOCKET fd) {
+        unsigned char pkt[10];
+        FillModePacket(pkt);
+        SendFrame(fd, 0x2, pkt, sizeof(pkt));
+    }
+
     void BroadcastMode() {
-        const unsigned char pkt[2] = { kPktMode, (unsigned char)(menuMode_ ? 1 : 0) };
+        unsigned char pkt[10];
+        FillModePacket(pkt);
         for (Conn& c : conns_) if (c.isWs) SendFrame(c.fd, 0x2, pkt, sizeof(pkt));
     }
 
@@ -783,8 +889,7 @@ private:
             c.in.erase(c.in.begin(), c.in.begin() + (ptrdiff_t)(end + 4));
             WriteLog(L"Web mouse relay: client upgraded to WebSocket");
 
-            const unsigned char pkt[2] = { kPktMode, (unsigned char)(menuMode_ ? 1 : 0) };
-            SendFrame(c.fd, 0x2, pkt, sizeof(pkt));
+            SendModeTo(c.fd);
             Probe("ping");
             return true;
         }
