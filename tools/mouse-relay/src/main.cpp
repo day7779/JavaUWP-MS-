@@ -1822,7 +1822,9 @@ private:
     }
 
     float IpScreenTop(float uiHeight) const {
-        return (uiHeight - (kTouchLayout ? 236.0f : 216.0f)) * 0.5f;
+        // touch runs title down to the bottom of Connect, 374 + 46
+        const float contentHeight = kTouchLayout ? 420.0f : 216.0f;
+        return std::max(8.0f, (uiHeight - contentHeight) * 0.5f);
     }
 
     void RenderIpScreen(float uiWidth, float uiHeight) {
