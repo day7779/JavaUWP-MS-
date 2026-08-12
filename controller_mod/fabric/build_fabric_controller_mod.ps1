@@ -15,7 +15,11 @@ $controllerCoreJava = Join-Path $root "controller_mod\core\src\main\java"
 if (-not $MinecraftVersion) { $MinecraftVersion = $ProjectConfig.MinecraftVersion }
 if (-not $LoaderVersion) { $LoaderVersion = $ProjectConfig.FabricLoaderVersion }
 
-$supportedVersions = @("1.16.5", "1.19.2", "1.20.1", "1.20.4", "1.21.1", "1.21.4", "1.21.11")
+$variantRootDir = Join-Path $PSScriptRoot "src\variants"
+$supportedVersions = @("1.16.5", "1.19.2") + @(
+    Get-ChildItem -LiteralPath $variantRootDir -Directory -ErrorAction SilentlyContinue |
+        Select-Object -ExpandProperty Name)
+$supportedVersions = @($supportedVersions | Select-Object -Unique)
 if ($supportedVersions -notcontains $MinecraftVersion) {
     throw "Fabric controller mod sources currently support Minecraft $($supportedVersions -join ', '). Add a controller variant before bundling $MinecraftVersion."
 }
@@ -26,20 +30,20 @@ $jarName = "banditvault-fabric-controller-1.0.0.jar"
 $jarPath = Join-Path $buildRoot $jarName
 $gameDir = Get-ConfigPath "GameDir"
 
-$javaHome = Resolve-JavaHome
+$javaHome = Resolve-JavaHomeForMinecraft -MinecraftVersion $MinecraftVersion
 $javac = Join-Path $javaHome "bin\javac.exe"
 $jar = Join-Path $javaHome "bin\jar.exe"
-$mixinVersion = $ProjectConfig.MixinVersion
-$mixinJar = Join-Path $gameDir "libraries\net\fabricmc\sponge-mixin\$mixinVersion\sponge-mixin-$mixinVersion.jar"
-$clientJar = Join-Path $gameDir ".fabric\remappedJars\minecraft-$MinecraftVersion-$LoaderVersion\client-intermediary.jar"
+$mixinJar = Resolve-SpongeMixinJar -GameDir $gameDir -MinecraftVersion $MinecraftVersion -LoaderVersion $LoaderVersion
+$clientJar = Resolve-FabricClientJar -GameDir $gameDir -MinecraftVersion $MinecraftVersion -LoaderVersion $LoaderVersion
 if (-not (Test-Path $clientJar)) {
-    Write-Host "Remapped client jar missing for $MinecraftVersion-${LoaderVersion}; preparing Fabric cache."
+    Write-Host "Client jar missing for $MinecraftVersion-${LoaderVersion}; preparing Fabric cache."
     & (Join-Path $root "scripts\prepare-ci-cache.ps1") `
         -MinecraftVersion $MinecraftVersion `
         -FabricLoaderVersion $LoaderVersion
+    $clientJar = Resolve-FabricClientJar -GameDir $gameDir -MinecraftVersion $MinecraftVersion -LoaderVersion $LoaderVersion
 }
 if (-not (Test-Path $clientJar)) {
-    throw "Remapped client jar not found for $MinecraftVersion-${LoaderVersion}: $clientJar."
+    throw "Client jar not found for $MinecraftVersion-${LoaderVersion}: $clientJar."
 }
 
 Remove-Item -Recurse -Force $buildRoot -ErrorAction SilentlyContinue
@@ -74,6 +78,7 @@ $variantLayers = @{
     "1.21.1" = @("1.21.1", "1.21", "1.20.4", "1.20.1")
     "1.21.4" = @("1.21.4", "1.21", "1.20.4", "1.20.1")
     "1.21.11" = @("1.21.11", "1.21.4", "1.21", "1.20.4", "1.20.1")
+    "26.2" = @("26.2", "1.21.11", "1.21.4", "1.21", "1.20.4", "1.20.1")
 }
 $overlayNames = @(
     "BanditControllerCompat.java",
@@ -83,9 +88,16 @@ $overlayNames = @(
     "BanditControllerScreenMixin.java",
     "BanditControllerRecipeBookScreenMixin.java"
 )
-if (Test-Path (Join-Path $PSScriptRoot ("src\variants\$MinecraftVersion\banditvault\fabriccontroller\mixin\BanditControllerHandledScreenMixin.java"))) {
-    $overlayNames += "BanditControllerHandledScreenMixin.java"
+# anything a version drops in its own folder that shadows a main source becomes an overlay,
+# so a new target never needs this list edited
+$mainLeafNames = @(Get-ChildItem $srcJava -Recurse -Filter "*.java" | Select-Object -ExpandProperty Name)
+$versionVariantDir = Join-Path $PSScriptRoot "src\variants\$MinecraftVersion"
+if (Test-Path $versionVariantDir) {
+    $overlayNames += @(Get-ChildItem $versionVariantDir -Recurse -Filter "*.java" |
+        Select-Object -ExpandProperty Name |
+        Where-Object { $mainLeafNames -contains $_ })
 }
+$overlayNames = @($overlayNames | Select-Object -Unique)
 if ($variantLayers.ContainsKey($MinecraftVersion)) {
     $sources = @($sources | Where-Object { $overlayNames -notcontains (Split-Path $_ -Leaf) })
     foreach ($name in $overlayNames) {

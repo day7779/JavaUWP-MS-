@@ -20,20 +20,21 @@ $jarPath = Join-Path $buildRoot $compatJarName
 $gameDir = Get-ConfigPath "GameDir"
 $modsDir = Join-Path $gameDir "mods"
 
-$javaHome = Resolve-JavaHome
+$javaHome = Resolve-JavaHomeForMinecraft -MinecraftVersion $MinecraftVersion
 $javac = Join-Path $javaHome "bin\javac.exe"
 $jar = Join-Path $javaHome "bin\jar.exe"
-$mixinVersion = $ProjectConfig.MixinVersion
-$mixinJar = Join-Path $gameDir "libraries\net\fabricmc\sponge-mixin\$mixinVersion\sponge-mixin-$mixinVersion.jar"
-$clientJar = Join-Path $gameDir ".fabric\remappedJars\minecraft-$MinecraftVersion-$LoaderVersion\client-intermediary.jar"
+$javap = Join-Path $javaHome "bin\javap.exe"
+$mixinJar = Resolve-SpongeMixinJar -GameDir $gameDir -MinecraftVersion $MinecraftVersion -LoaderVersion $LoaderVersion
+$clientJar = Resolve-FabricClientJar -GameDir $gameDir -MinecraftVersion $MinecraftVersion -LoaderVersion $LoaderVersion
 if (-not (Test-Path $clientJar)) {
-    Write-Host "Remapped client jar missing for $MinecraftVersion-${LoaderVersion}; preparing Fabric cache."
+    Write-Host "Client jar missing for $MinecraftVersion-${LoaderVersion}; preparing Fabric cache."
     & (Join-Path $root "scripts\prepare-ci-cache.ps1") `
         -MinecraftVersion $MinecraftVersion `
         -FabricLoaderVersion $LoaderVersion
+    $clientJar = Resolve-FabricClientJar -GameDir $gameDir -MinecraftVersion $MinecraftVersion -LoaderVersion $LoaderVersion
 }
 if (-not (Test-Path $clientJar)) {
-    throw "Remapped client jar not found for $MinecraftVersion-${LoaderVersion}: $clientJar."
+    throw "Client jar not found for $MinecraftVersion-${LoaderVersion}: $clientJar."
 }
 
 Remove-Item -Recurse -Force $buildRoot -ErrorAction SilentlyContinue
@@ -76,7 +77,27 @@ $disabledSources += "BanditMouseCursorOverlay"
 
 $sources = Get-ChildItem $srcJava -Recurse -Filter "*.java" | Select-Object -ExpandProperty FullName
 
-if ($MinecraftVersion -eq $mixinAuthorVersion) {
+# a version folder overlays same-named main sources and owns its own mixin list, which is how
+# unobfuscated targets opt out of the intermediary-keyed gating below
+$variantDir = Join-Path $PSScriptRoot "src\variants\$MinecraftVersion"
+$variantMixinsJson = Join-Path $variantDir "resources\banditvault-xbox-compat.mixins.json"
+$hasVariant = Test-Path $variantDir
+
+if ($hasVariant) {
+    $variantSources = @(Get-ChildItem $variantDir -Recurse -Filter "*.java" | Select-Object -ExpandProperty FullName)
+    $variantLeafNames = @($variantSources | ForEach-Object { Split-Path $_ -Leaf })
+    $sources = @($sources | Where-Object { $variantLeafNames -notcontains (Split-Path $_ -Leaf) })
+    $sources += $variantSources
+
+    if (-not (Test-Path $variantMixinsJson)) {
+        throw "Variant compat mod for $MinecraftVersion needs $variantMixinsJson"
+    }
+    $keep = @((Get-Content -Raw -Path $variantMixinsJson | ConvertFrom-Json).client)
+    $sources = @($sources | Where-Object {
+        $name = [System.IO.Path]::GetFileNameWithoutExtension($_)
+        ($name -notlike "*Mixin") -or ($keep -contains $name)
+    })
+} elseif ($MinecraftVersion -eq $mixinAuthorVersion) {
     $disabledMixins += "ZipFsBypass121Mixin"
 } else {
     $disabledMixins += @(
@@ -91,19 +112,19 @@ if ($MinecraftVersion -eq $mixinAuthorVersion) {
     }
 }
 
-if (-not (Test-ClientJarHasClass -ClientJar $clientJar -ClassName "class_11653")) {
-    $disabledMixins += "WorldLoadProgressTrackerMixin"
-}
-if (-not (Test-ClientJarHasClass -ClientJar $clientJar -ClassName "class_10619")) {
-    $disabledMixins += "ZipFsBypassMixin"
-}
-if (-not (Test-ClientJarHasClass -ClientJar $clientJar -ClassName "class_7665")) {
-    $disabledMixins += "ZipFsBypass121Mixin"
-}
-
-$hasSystemDetailsClass = Test-ClientJarHasClass -ClientJar $clientJar -ClassName "class_6396"
-if (-not $hasSystemDetailsClass) {
-    $disabledMixins += "SystemDetailsOshiBypassMixin"
+if (-not $hasVariant) {
+    if (-not (Test-ClientJarHasClass -ClientJar $clientJar -ClassName "class_11653")) {
+        $disabledMixins += "WorldLoadProgressTrackerMixin"
+    }
+    if (-not (Test-ClientJarHasClass -ClientJar $clientJar -ClassName "class_10619")) {
+        $disabledMixins += "ZipFsBypassMixin"
+    }
+    if (-not (Test-ClientJarHasClass -ClientJar $clientJar -ClassName "class_7665")) {
+        $disabledMixins += "ZipFsBypass121Mixin"
+    }
+    if (-not (Test-ClientJarHasClass -ClientJar $clientJar -ClassName "class_6396")) {
+        $disabledMixins += "SystemDetailsOshiBypassMixin"
+    }
 }
 
 $disabledMixins = @($disabledMixins | Select-Object -Unique)
@@ -157,6 +178,10 @@ $javaRelease = if (
 if ($LASTEXITCODE -ne 0) { throw "compatibility mod compile failed" }
 
 Copy-Item -Recurse "$srcResources\*" $classesDir -Force
+$variantResources = Join-Path $variantDir "resources"
+if ($hasVariant -and (Test-Path $variantResources)) {
+    Copy-Item -Recurse "$variantResources\*" $classesDir -Force
+}
 $fmj = Join-Path $classesDir "fabric.mod.json"
 (Get-Content $fmj -Raw).
     Replace("__MINECRAFT_VERSION__", $MinecraftVersion).
