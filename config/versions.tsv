@@ -1,4 +1,5 @@
 minecraftVersion	displayName	loader	loaderVersion	javaRuntime	supportLevel	controllerProvider	notes
+26.2	26.2 Fabric	fabric	0.19.3	current	experimental	fabric	First calendar-versioned target; unobfuscated jar, Java 25, LWJGL 3.4.1
 1.21.11	1.21.11 Fabric	fabric	0.19.2	current	supported	fabric	Current launcher default with bundled controller support
 1.21.4	1.21.4 Fabric	fabric	0.19.2	java21	testing	fabric	Anchor for 1.21.4 Fabric mods with bundled controller support
 1.21.4	1.21.4 NeoForge	neoforge	21.4.137	java21	experimental	none	Anchor for 1.21.4 NeoForge mods
