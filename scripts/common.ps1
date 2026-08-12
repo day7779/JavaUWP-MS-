@@ -166,6 +166,120 @@ function Resolve-JavaHome {
     throw "No suitable Java installation found. Set JAVA_HOME to a JDK $MajorVersion or newer install."
 }
 
+$script:MinecraftJavaMajorCache = @{}
+
+function Get-MinecraftJavaMajorVersion {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$MinecraftVersion
+    )
+
+    if ($script:MinecraftJavaMajorCache.ContainsKey($MinecraftVersion)) {
+        return $script:MinecraftJavaMajorCache[$MinecraftVersion]
+    }
+
+    $major = [int]$ProjectConfig.JavaRelease
+    try {
+        $manifest = Invoke-RestMethod -UseBasicParsing -TimeoutSec 60 `
+            -Uri "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json"
+        $entry = $manifest.versions | Where-Object { $_.id -eq $MinecraftVersion } | Select-Object -First 1
+        if ($entry) {
+            $versionJson = Invoke-RestMethod -UseBasicParsing -TimeoutSec 60 -Uri $entry.url
+            if ($versionJson.javaVersion -and $versionJson.javaVersion.majorVersion) {
+                $major = [int]$versionJson.javaVersion.majorVersion
+            }
+        }
+    } catch {
+        Write-Warning "Could not read the required Java version for Minecraft ${MinecraftVersion}: $($_.Exception.Message)"
+    }
+
+    $script:MinecraftJavaMajorCache[$MinecraftVersion] = $major
+    return $major
+}
+
+function Resolve-JavaHomeForMinecraft {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$MinecraftVersion
+    )
+
+    # javac and the remap launch both read the client jar, so the JDK has to be new enough
+    # to load its class files. 26.2 is class file 69, which JDK 21 refuses.
+    $required = [Math]::Max(
+        (Get-MinecraftJavaMajorVersion -MinecraftVersion $MinecraftVersion),
+        [int]$ProjectConfig.JavaRelease)
+    return Resolve-JavaHome -MajorVersion $required
+}
+
+function Resolve-SpongeMixinJar {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$GameDir,
+
+        [string]$MinecraftVersion,
+
+        [string]$LoaderVersion
+    )
+
+    if ($MinecraftVersion -and $LoaderVersion) {
+        $profilePath = Join-Path $GameDir "versions\fabric-loader-$LoaderVersion-$MinecraftVersion\fabric-loader-$LoaderVersion-$MinecraftVersion.json"
+        if (Test-Path $profilePath) {
+            $profileJson = Get-Content -Raw -Path $profilePath | ConvertFrom-Json
+            foreach ($library in $profileJson.libraries) {
+                $name = [string]$library.name
+                if ($name -notlike "net.fabricmc:sponge-mixin:*") { continue }
+                $mixinVersion = $name.Split(":")[2]
+                $candidate = Join-Path $GameDir "libraries\net\fabricmc\sponge-mixin\$mixinVersion\sponge-mixin-$mixinVersion.jar"
+                if (Test-Path $candidate) { return $candidate }
+            }
+        }
+    }
+
+    $configured = Join-Path $GameDir "libraries\net\fabricmc\sponge-mixin\$($ProjectConfig.MixinVersion)\sponge-mixin-$($ProjectConfig.MixinVersion).jar"
+    if (Test-Path $configured) { return $configured }
+
+    $newest = Get-ChildItem -LiteralPath (Join-Path $GameDir "libraries\net\fabricmc\sponge-mixin") `
+        -Recurse -Filter "sponge-mixin-*.jar" -ErrorAction SilentlyContinue |
+        Sort-Object Name -Descending |
+        Select-Object -First 1
+    if ($newest) { return $newest.FullName }
+
+    throw "sponge-mixin jar not found under $GameDir. Run scripts\prepare-ci-cache.ps1 for this target first."
+}
+
+function Test-FabricTargetHasIntermediary {
+    param(
+        [Parameter(Mandatory = $true)][string]$GameDir,
+        [Parameter(Mandatory = $true)][string]$MinecraftVersion,
+        [Parameter(Mandatory = $true)][string]$LoaderVersion
+    )
+
+    $profilePath = Join-Path $GameDir "versions\fabric-loader-$LoaderVersion-$MinecraftVersion\fabric-loader-$LoaderVersion-$MinecraftVersion.json"
+    if (-not (Test-Path $profilePath)) { return $true }
+
+    $profileJson = Get-Content -Raw -Path $profilePath | ConvertFrom-Json
+    foreach ($library in $profileJson.libraries) {
+        if ([string]$library.name -like "net.fabricmc:intermediary:*") { return $true }
+    }
+
+    return $false
+}
+
+function Resolve-FabricClientJar {
+    param(
+        [Parameter(Mandatory = $true)][string]$GameDir,
+        [Parameter(Mandatory = $true)][string]$MinecraftVersion,
+        [Parameter(Mandatory = $true)][string]$LoaderVersion
+    )
+
+    # 26.x ships unobfuscated, so Fabric has no intermediary for it and never writes a
+    # remapped jar. Mods for those targets compile straight against the client jar.
+    $remapped = Join-Path $GameDir ".fabric\remappedJars\minecraft-$MinecraftVersion-$LoaderVersion\client-intermediary.jar"
+    if (Test-Path $remapped) { return $remapped }
+
+    return (Join-Path $GameDir "versions\$MinecraftVersion\$MinecraftVersion.jar")
+}
+
 function Resolve-Python {
     if ($env:PYTHON) {
         if (Test-Path $env:PYTHON) {

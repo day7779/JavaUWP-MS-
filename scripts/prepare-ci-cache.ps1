@@ -27,7 +27,7 @@ $nativesDir = if ($MinecraftVersion -and $MinecraftVersion -ne $ProjectConfig.Mi
 $toolsDir = Get-ConfigPath "ToolsDir"
 $notesDir = Get-ConfigPath "NotesDir"
 $assetIndex = if ($AssetIndex) { $AssetIndex } else { "" }
-$javaHome = Resolve-JavaHome
+$javaHome = Resolve-JavaHomeForMinecraft -MinecraftVersion $version
 $javaExe = Join-Path $javaHome "bin\java.exe"
 
 function Get-SafeFileName {
@@ -170,6 +170,13 @@ function Add-LibraryJar {
         [Parameter(Mandatory = $true)][string]$RelativePath
     )
 
+    # 26.x lists each platform's natives as its own library entry sharing the base artifact's
+    # maven key, and natives-linux sorts before the real jar, so it would win the dedupe and
+    # take lwjgl's classes off the classpath
+    if ($RelativePath -match '-natives-[A-Za-z0-9_.-]+\.jar$') {
+        return
+    }
+
     $jarPath = Join-Path $gameDir ("libraries\" + $RelativePath.Replace('/', '\'))
     if (-not (Test-Path $jarPath)) {
         Write-Warning "Classpath library missing: $jarPath"
@@ -293,6 +300,12 @@ if ($assetIndexId -ne $assetIndex) {
 }
 
 Write-Host "=== Generating Fabric remapped client jar ==="
+if (-not (Test-FabricTargetHasIntermediary -GameDir $gameDir -MinecraftVersion $version -LoaderVersion $loaderVersion)) {
+    Write-Host "Fabric has no intermediary for $version, so there is nothing to remap. Mods build against the client jar."
+    Write-Host "CI cache is ready."
+    return
+}
+
 $remappedJar = Join-Path $gameDir ".fabric\remappedJars\minecraft-$version-$loaderVersion\client-intermediary.jar"
 $existingRemappedJar = Get-Item -LiteralPath $remappedJar -ErrorAction SilentlyContinue
 if ($existingRemappedJar -and $existingRemappedJar.Length -le 0) {
@@ -356,6 +369,19 @@ if (-not (Test-Path $remappedJar)) {
         "--accessToken", "0",
         "--versionType", "release"
     )
+
+    # fabric.modsFolder does not exist before loader 0.15, so old loaders still read gameDir\mods
+    # and try to resolve the default target's mods against the wrong game version
+    $modsDir = Join-Path $gameDir "mods"
+    $stashedModsDir = Join-Path $gameDir ".fabric\mods-stashed-$version-$loaderVersion"
+    $modsStashed = $false
+    if ((Test-Path $modsDir) -and @(Get-ChildItem $modsDir -File -ErrorAction SilentlyContinue).Count -gt 0) {
+        Remove-Item -Recurse -Force $stashedModsDir -ErrorAction SilentlyContinue
+        Move-Item -LiteralPath $modsDir -Destination $stashedModsDir -Force
+        $modsStashed = $true
+    }
+
+    try {
 
     $javaArgumentLine = ($javaArgs | ForEach-Object { ConvertTo-QuotedProcessArgument ([string]$_) }) -join " "
     Remove-Item -LiteralPath $remapStdoutLog, $remapStderrLog -Force -ErrorAction SilentlyContinue
@@ -442,6 +468,13 @@ if (-not (Test-Path $remappedJar)) {
     }
     if ($fabricExitCode -ne 0) {
         Write-Warning "Fabric launch exited with code $fabricExitCode after creating the remapped jar."
+    }
+
+    } finally {
+        if ($modsStashed) {
+            Remove-Item -Recurse -Force $modsDir -ErrorAction SilentlyContinue
+            Move-Item -LiteralPath $stashedModsDir -Destination $modsDir -Force
+        }
     }
 }
 
