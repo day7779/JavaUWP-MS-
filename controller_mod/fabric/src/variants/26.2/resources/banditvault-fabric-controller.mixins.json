@@ -1,0 +1,31 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "banditvault.fabriccontroller.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "client": [
+    "BanditControllerClientMixin",
+    "BanditControllerContainerAccessor",
+    "BanditControllerControlsScreenMixin",
+    "BanditControllerCreativeInventoryAccessor",
+    "BanditControllerEditBoxAccessor",
+    "BanditControllerGameRendererMixin",
+    "BanditControllerHandledScreenMixin",
+    "BanditControllerHudMixin",
+    "BanditControllerInventoryScreenMixin",
+    "BanditControllerKeyboardInputMixin",
+    "BanditControllerOptionsSubScreenAccessor",
+    "BanditControllerRecipeBookAccessor",
+    "BanditControllerRecipeBookPageAccessor",
+    "BanditControllerRecipeBookScreenMixin",
+    "BanditControllerRecipeBookScreenAccessor",
+    "BanditControllerRecipeOverlayAccessor",
+    "BanditControllerScreenMixin",
+    "BanditControllerSignEditScreenAccessor",
+    "BanditControllerTextFieldAccessor",
+    "BanditControllerTextModelAccessor"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}
