@@ -54,6 +54,8 @@ EXPORTS
     glfwGetOSMesaContext
     glfwGetOSMesaDepthBuffer
     glfwGetPhysicalDevicePresentationSupport
+    glfwGetPreeditCandidate
+    glfwGetPreeditCursorRectangle
     glfwGetPrimaryMonitor
     glfwGetProcAddress
     glfwGetRequiredInstanceExtensions
@@ -75,6 +77,7 @@ EXPORTS
     glfwGetWindowOpacity
     glfwGetWindowPos
     glfwGetWindowSize
+    glfwGetWindowTitle
     glfwGetWindowUserPointer
     glfwHideWindow
     glfwIconifyWindow
@@ -90,6 +93,7 @@ EXPORTS
     glfwPostEmptyEvent
     glfwRawMouseMotionSupported
     glfwRequestWindowAttention
+    glfwResetPreeditText
     glfwRestoreWindow
     glfwSetCharCallback
     glfwSetCharModsCallback
@@ -103,6 +107,7 @@ EXPORTS
     glfwSetFramebufferSizeCallback
     glfwSetGamma
     glfwSetGammaRamp
+    glfwSetIMEStatusCallback
     glfwSetInputMode
     glfwSetJoystickCallback
     glfwSetJoystickUserPointer
@@ -110,6 +115,9 @@ EXPORTS
     glfwSetMonitorCallback
     glfwSetMonitorUserPointer
     glfwSetMouseButtonCallback
+    glfwSetPreeditCallback
+    glfwSetPreeditCandidateCallback
+    glfwSetPreeditCursorRectangle
     glfwSetScrollCallback
     glfwSetTime
     glfwSetWindowAspectRatio
