@@ -1,4 +1,4 @@
-﻿#include "launcher_ui.h"
+#include "launcher_ui.h"
 
 #include "mods_browser.h"
 #include "auth_screen.h"

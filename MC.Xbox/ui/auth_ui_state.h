@@ -10,6 +10,8 @@
 #include "profiles.h"
 #include "qr_code.h"
 
+constexpr int kModsTargetRowsVisible = 10;
+
 struct AuthUiState {
     std::wstring title;
     std::wstring userCode;
@@ -46,6 +48,7 @@ struct AuthUiState {
     std::vector<LaunchTarget> modsTargets;
     std::wstring modsBrowseTargetId;
     bool modsTargetOpen = false;
+    int modsTargetScroll = 0;
     int modsTargetSel = 0;
     bool modsProfileOpen = false;
     std::wstring modsProfileId;

@@ -10,23 +10,20 @@ output\BanditLauncher_<appx-version>.appx
 
 ## Requirements
 
+Install these, then run one command. Everything else the build needs is downloaded for you by `scripts\setup.ps1`.
+
 - Windows with PowerShell 5.1 or newer.
 - Visual Studio or Visual Studio Build Tools with the MSVC x64 C++ tools.
 - Windows 10 or Windows 11 SDK.
-- JDK 21 or newer for the main build runtime. Set `JAVA_HOME` if auto detection does not find it. JDK 25 is recommended for release equivalent package builds.
-- An exact JDK 21 install for the packaged Java 21 runtime. Set `JAVA21_HOME` or `JDK21_HOME` if auto detection does not find it.
-- JDK 17 on the build machine if you want the package to include the optional `jre17` runtime for Java 17 catalog targets.
-- Python 3 with Pillow.
+- Three JDKs. Set `JAVA_HOME`, `JAVA21_HOME` or `JDK21_HOME`, and `JAVA17_HOME` or `JDK17_HOME` if auto detection does not find them.
+  - JDK 25 for the main build runtime and for the `26.2` target, which JDK 21 cannot read.
+  - An exact JDK 21 install for the packaged Java 21 runtime.
+  - JDK 17, only if the package should include the optional `jre17` runtime for the Java 17 catalog targets.
 - Desktop install of Git `https://git-scm.com/install/windows`
-- Fabric installer JAR at `staging\cache\tools\fabric-installer.jar`.
-- Minecraft/LWJGL native DLLs in `staging\cache\natives-1.21`.
-- Mesa UWP runtime DLLs in `mesa-runtime\`, or another folder passed to the build.
 
-Install Pillow:
+Mesa UWP runtime DLLs are already tracked in `mesa-runtime\`. Pass `-MesaRuntimeDir` if you want to build against a different one.
 
-```powershell
-python -m pip install pillow
-```
+Forge targets additionally need `build\forge-installer.jar` placed by hand. That is the only file the setup script cannot fetch for you, and it is only needed if you are building Forge.
 
 ## Versions
 
@@ -38,7 +35,6 @@ Current defaults:
 - Asset index: `29`
 - Fabric Loader: `0.19.2`
 - Java release: `21`
-- LWJGL GLFW natives: `3.3.3`
 - JNA: `5.17.0`
 
 The default target is `1.21.11 + Fabric 0.19.2`, but the package also includes catalog entries and per target runtime manifests for the playable targets listed in `config\versions.tsv`, including the experimental `1.21.1 + NeoForge 21.1.233` target.
@@ -70,7 +66,7 @@ Forge `1.20.1 + 47.4.20` has an experimental launch provider in `launch\loaders\
 Forge build inputs that belong in the repo:
 
 ```text
-build\forge-install-profile.json
+config\forge-install-profile.json
 ```
 
 Place the matching Forge installer locally (not committed) before building Forge patched clients or controller mods:
@@ -82,6 +78,18 @@ build\forge-installer.jar
 `scripts\prepare-forge-patched-client.ps1` uses those files to generate or refresh the patched Forge client jar in the local cache. See [PATCHING.md](PATCHING.md) for controller mod details.
 
 For adding another playable Forge target, add it to `config\versions.tsv`, extend `launch\loaders\forge.cpp`, and let `build.ps1` generate the manifest plus any `controller_mod` output under `runtime\version-mods\<target-id>\`.
+
+### Minecraft 26.2
+
+`26.2` is the first calendar versioned target. It is cataloged as experimental with Fabric Loader `0.19.3`, and it is the only target that needs `0.19.3`. Four things about it differ from every other target.
+
+**It needs JDK 25.** Mojang declares Java 25 for `26.2` and its client classes are class file version 69, which JDK 21 refuses to read. `Resolve-JavaHomeForMinecraft` in `scripts\common.ps1` picks the higher of the version's declared Java major and the `JavaRelease` default, so a JDK 25 has to be installed to compile against this target or to remap for it. The catalog row records `javaRuntime=current`.
+
+**The client ships unobfuscated.** `26.x` carries real class and method names, so Fabric publishes no intermediary mappings for it and never writes a remapped jar. `Resolve-FabricClientJar` falls through to `staging\cache\gameDir\versions\26.2\26.2.jar` and mods for this target compile straight against the client jar. The remapped jar step below does not apply to `26.2`.
+
+**Mixin targets are written in Mojang names.** The `src\main` compatibility mixins target intermediary names such as `net.minecraft.class_4239` and `method_47525`. The `26.2` variants under `compat_mod\src\variants\26.2` target `net.minecraft.util.FileUtil` and `createDirectoriesSafe` instead. A mixin copied between the two will not apply.
+
+**LWJGL is 3.4.1 and its natives are listed differently.** Mojang lists each platform's LWJGL natives for `26.2` as its own library entry sharing the base artifact's maven key. `Add-LibraryJar` in `scripts\setup.ps1` drops every `-natives-` entry for that reason: without the filter, `natives-linux` sorts first, wins the maven dedupe, and takes LWJGL's classes off the generated classpath.
 
 ## UWP host source layout
 
@@ -136,56 +144,25 @@ Builds target Xbox Series S and Series X only. Xbox One support was removed and 
 
 ## Fresh setup
 
-Create the local cache folders and place the Fabric installer here:
-
-```text
-staging\cache\tools\fabric-installer.jar
-```
-
-For CI style setup on a clean machine, the helper below downloads the public Mojang/Fabric metadata, client libraries, Windows native DLLs, Fabric installer, asset index, and generates the local Fabric remapped client jar:
+From the repo root:
 
 ```powershell
-.\scripts\prepare-ci-cache.ps1
+.\scripts\setup.ps1
 ```
 
-The helper does not make the remapped client jar part of the repository or release package. It stays in ignored local cache paths under `staging\cache`.
+That is the whole setup step. It downloads the Mojang and Fabric metadata, the client libraries, the Windows native DLLs, the Fabric installer, and the asset index, installs and patches the Fabric loader, and generates the local Fabric remapped client jar. Everything lands in ignored cache paths under `staging\cache`, so none of it enters the repository or the release package.
 
-Download the Minecraft client libraries for the local build cache:
+It takes several hundred megabytes on a cold cache, which is why `build.ps1` does not run it for you. Run it once on a clean machine, then run `.\build.ps1`.
+
+To prepare a target other than the default:
 
 ```powershell
-.\scripts\download-libs.ps1
+.\scripts\setup.ps1 -MinecraftVersion 1.20.1 -FabricLoaderVersion 0.19.2
 ```
 
-If you need to regenerate Fabric remapped jars from scratch, also download the local asset cache used by the desktop Fabric launch helper:
+`compat_mod\build_compat_mod.ps1` and `controller_mod\fabric\build_fabric_controller_mod.ps1` both call it themselves when a target's client jar is missing, so per target preparation is usually automatic.
 
-```powershell
-.\scripts\download-assets.ps1
-```
-
-Run the Fabric installer:
-
-```powershell
-java -jar .\staging\cache\tools\fabric-installer.jar client -dir .\staging\cache\gameDir -mcversion 1.21.11 -loader 0.19.2 -launcher win32 -noprofile
-```
-
-Put the needed Minecraft and LWJGL native DLLs here:
-
-```text
-staging\cache\natives-1.21\
-```
-
-That folder is local only and ignored by git.
-
-To obtain those, use the official Minecraft launcher, create a 1.21.11 instance, launch it fully past the accessibility screen, close the game, then go to ".minecraft" in your appdata folder, search "*.dll" and grab these DLLs:
-
-```text
-glfw.dll
-jemalloc.dll
-lwjgl.dll
-lwjgl_opengl.dll
-lwjgl_stb.dll
-OpenAL.dll
-```
+If the setup script cannot run, see the manual fallback at the end of this page.
 
 ## Microsoft Sign In
 
@@ -299,7 +276,7 @@ If you ran `download-assets.ps1`, `staging\cache\assets\indexes\29.json` should 
 
 If all of those are there, put launcher owned or explicitly allowed mod jars into `staging\cache\gameDir\mods`. The compatibility mod is generated there automatically by the build.
 
-For non default Fabric targets, `compat_mod\build_compat_mod.ps1` will call `scripts\prepare-ci-cache.ps1` for the requested Minecraft and loader version if the matching remapped client jar is missing.
+For non default Fabric targets, `compat_mod\build_compat_mod.ps1` will call `scripts\setup.ps1` for the requested Minecraft and loader version if the matching remapped client jar is missing.
 
 `1.20.1` Fabric controller sources live under `controller_mod\fabric\src\variants\1.20.1\` because that target uses different intermediary mappings than the default controller sources.
 
@@ -327,7 +304,7 @@ The top level build runs this step automatically. You can also run it directly:
 ```
 
 The script overlays patched Fabric Loader classes into the local ignored loader JAR under `staging\cache\gameDir`.
-The package step patches and copies every Fabric loader version needed by `config\versions.tsv`, currently including `0.19.2` and `0.14.25`.
+The package step patches and copies every Fabric loader version needed by `config\versions.tsv`, currently `0.19.3` for `26.2`, `0.19.2` for the `1.19.3` through `1.21.11` targets, and `0.14.25` for `1.16.5` and `1.19.2`.
 
 ## Patch securejarhandler for NeoForge
 
@@ -413,15 +390,61 @@ To include all ignored files, including downloaded cache files:
 
 - `No suitable Java installation found`: set `JAVA_HOME` to a JDK 21 or newer install.
 - `No exact Java 21 installation found`: set `JAVA21_HOME` or `JDK21_HOME` to a JDK 21 install.
-- `No suitable Python installation found`: install Python 3 and Pillow, or set `PYTHON`.
 - `vswhere.exe not found`: install Visual Studio Build Tools with C++ tools.
 - `Mesa UWP runtime DLLs not found`: pass `-MesaRuntimeDir`, set `MESA_UWP_DIR`, or restore `mesa-runtime\`.
-- Missing `client-intermediary.jar`: run the Fabric client once from the local desktop cache as shown above.
+- Missing `client-intermediary.jar`: run `.\scripts\setup.ps1` for that target.
 - `Forge installer jar missing at build\forge-installer.jar`: place the official Forge `1.20.1-47.4.20` installer jar at that path before building Forge controller mods or running `scripts\prepare-forge-patched-client.ps1`.
-- Forge controller compile failure: ensure the patched Forge client exists in the local cache and that `build\forge-install-profile.json` is present.
-- Missing native DLLs: fill `staging\cache\natives-1.21` with the native DLLs required by the Minecraft and LWJGL runtime.
+- Forge controller compile failure: ensure the patched Forge client exists in the local cache and that `config\forge-install-profile.json` is present.
+- Missing native DLLs: run `.\scripts\setup.ps1`, which downloads them into `staging\cache\natives-1.21`.
 - First launch downloads every required official file after sign in. A later launch should verify and skip files that are already downloaded.
 - Runtime download failure: check `LocalState\logs\current\mc_launch.log` for the manifest path, URL, HTTP status, or SHA1 mismatch.
 - Modrinth browse/install failure: check `LocalState\logs\current\mc_launch.log` for `Modrinth search`, `Modrinth versions`, HTTP status, download, or SHA1 verification messages.
 - Package signing failure: delete the ignored local `.pfx` under `staging\certs` and rerun `build.ps1`, or set `APPX_CERT_SUBJECT`.
 - If you can't find your appdata folder, type `%appdata%` into your address bar in your file explorer.
+
+## Appendix: manual cache setup
+
+`scripts\setup.ps1` does all of this for you. Follow it only if the script cannot run, for example on a machine with no network access to the Mojang and Fabric endpoints.
+
+Place the Fabric installer here:
+
+```text
+staging\cache\tools\fabric-installer.jar
+```
+
+Download the Minecraft client libraries:
+
+```powershell
+.\scripts\download-libs.ps1
+```
+
+Download the local asset cache used by the desktop Fabric launch helper, needed if you are regenerating Fabric remapped jars from scratch:
+
+```powershell
+.\scripts\download-assets.ps1
+```
+
+Run the Fabric installer:
+
+```powershell
+java -jar .\staging\cache\tools\fabric-installer.jar client -dir .\staging\cache\gameDir -mcversion 1.21.11 -loader 0.19.2 -launcher win32 -noprofile
+```
+
+Put the Minecraft and LWJGL native DLLs here. The folder is local only and ignored by git:
+
+```text
+staging\cache\natives-1.21\
+```
+
+To obtain those by hand, use the official Minecraft launcher, create a 1.21.11 instance, launch it fully past the accessibility screen, close the game, then go to ".minecraft" in your appdata folder, search "*.dll" and grab these:
+
+```text
+glfw.dll
+jemalloc.dll
+lwjgl.dll
+lwjgl_opengl.dll
+lwjgl_stb.dll
+OpenAL.dll
+```
+
+Then run the Fabric client once from the local desktop cache so the remapped client jar is generated.

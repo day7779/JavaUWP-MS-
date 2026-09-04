@@ -1,25 +1,18 @@
 package banditvault.fabriccontroller;
 
-import java.io.File;
-import java.io.FileWriter;
-import java.io.IOException;
-import java.time.LocalTime;
+import banditvault.controllercore.ControllerLog;
 
 public final class FabricControllerLog {
-    private static final File LOG_FILE = new File(System.getProperty("user.dir", "."), "xbox_compat.log");
+    private static final String TAG = "fabric_controller";
 
     private FabricControllerLog() {
     }
 
     public static void log(String message) {
-        String line = "[" + LocalTime.now() + "] [fabric_controller] " + message + System.lineSeparator();
-        try (FileWriter out = new FileWriter(LOG_FILE, true)) {
-            out.write(line);
-        } catch (IOException ignored) {
-        }
+        ControllerLog.log(TAG, message);
     }
 
-    public static void logException(String message, Throwable t) {
-        log(message + ": " + t);
+    public static void logException(String message, Throwable throwable) {
+        ControllerLog.logException(TAG, message, throwable);
     }
 }

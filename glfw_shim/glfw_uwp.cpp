@@ -483,8 +483,9 @@ static EventRegistrationToken g_pointerReleasedToken = {};
 static ComPtr<CoreWindowPointerHandler> g_pointerWheelHandler;
 static EventRegistrationToken g_pointerWheelToken = {};
 static bool g_raw_mouse_motion = false;
-static bool g_mouse_active_latched = false;         
-static const DWORD kMouseCompanionTimeoutMs = 3000; 
+static bool g_mouse_active_latched = false;
+static const DWORD kMouseCompanionTimeoutMs = 3000;
+static const ULONGLONG kDisplayScaleCacheMs = 500;
 static int g_width = 1920;
 static volatile LONG g_processing_events = 0;
 static int g_process_events_error_log_count = 0;
@@ -648,15 +649,20 @@ static bool DirectoryExists(const wchar_t* path) {
     return attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY);
 }
 
-static bool GraphicsRuntimeReady(const wchar_t* path) {
+// libEGL only tells us which flavour the folder holds
+static bool GraphicsRuntimeReady(const wchar_t* path, BOOL* usesGles) {
+    if (usesGles) *usesGles = FALSE;
     if (!DirectoryExists(path)) return false;
 
     wchar_t glPath[MAX_PATH];
     wchar_t eglPath[MAX_PATH];
     JoinPath(glPath, MAX_PATH, path, L"opengl32.dll");
     JoinPath(eglPath, MAX_PATH, path, L"libEGL.dll");
-    return GetFileAttributesW(glPath) != INVALID_FILE_ATTRIBUTES &&
-        GetFileAttributesW(eglPath) != INVALID_FILE_ATTRIBUTES;
+    if (GetFileAttributesW(glPath) == INVALID_FILE_ATTRIBUTES) return false;
+    if (usesGles) {
+        *usesGles = GetFileAttributesW(eglPath) != INVALID_FILE_ATTRIBUTES;
+    }
+    return true;
 }
 
 static bool SelectGraphicsRuntimeDir(
@@ -671,19 +677,22 @@ static bool SelectGraphicsRuntimeDir(
     GetGraphicsRuntimeName(requested, (int)(sizeof(requested) / sizeof(requested[0])));
 
     wchar_t candidate[MAX_PATH];
+    BOOL usesGles = FALSE;
     swprintf_s(candidate, L"%s\\graphics\\%s", exeDir, requested);
-    if (GraphicsRuntimeReady(candidate)) {
+    if (GraphicsRuntimeReady(candidate, &usesGles)) {
         swprintf_s(runtimeDir, runtimeDirCch, L"%s", candidate);
         swprintf_s(packagePrefix, packagePrefixCch, L"graphics\\%s", requested);
-        ShimLog("Graphics runtime selected: %S (%S)", requested, runtimeDir);
+        g_graphicsRuntimeUsesGles = usesGles;
+        ShimLog("Graphics runtime selected: %S (%S) gles=%d", requested, runtimeDir, usesGles ? 1 : 0);
         return true;
     }
 
     swprintf_s(candidate, L"%s\\natives\\graphics\\%s", exeDir, requested);
-    if (GraphicsRuntimeReady(candidate)) {
+    if (GraphicsRuntimeReady(candidate, &usesGles)) {
         swprintf_s(runtimeDir, runtimeDirCch, L"%s", candidate);
         swprintf_s(packagePrefix, packagePrefixCch, L"natives\\graphics\\%s", requested);
-        ShimLog("Graphics runtime selected: %S (%S)", requested, runtimeDir);
+        g_graphicsRuntimeUsesGles = usesGles;
+        ShimLog("Graphics runtime selected: %S (%S) gles=%d", requested, runtimeDir, usesGles ? 1 : 0);
         return true;
     }
 
@@ -907,17 +916,17 @@ static bool CoreWindowAcceptsInput() {
 
 static int DisambiguateLeftRightKey(VirtualKey virtualKey, const CorePhysicalKeyStatus& status, int glfwKey) {
     switch ((int)virtualKey) {
-    case 16:  
-    case 160: 
-    case 161: 
+    case 16:
+    case 160:
+    case 161:
         return (status.ScanCode == 0x36) ? GLFW_KEY_RIGHT_SHIFT : GLFW_KEY_LEFT_SHIFT;
-    case 17:  
-    case 162: 
-    case 163: 
+    case 17:
+    case 162:
+    case 163:
         return status.IsExtendedKey ? GLFW_KEY_RIGHT_CONTROL : GLFW_KEY_LEFT_CONTROL;
-    case 18:  
-    case 164: 
-    case 165: 
+    case 18:
+    case 164:
+    case 165:
         return status.IsExtendedKey ? GLFW_KEY_RIGHT_ALT : GLFW_KEY_LEFT_ALT;
     default:
         return glfwKey;
@@ -979,6 +988,7 @@ static bool g_banditKeyboardMultiline = false;
 static winrt::Windows::UI::Core::CoreWindow g_banditKeyboardWindow{nullptr};
 static winrt::Windows::UI::Text::Core::CoreTextEditContext g_banditKeyboardContext{nullptr};
 static winrt::Windows::UI::ViewManagement::InputPane g_banditKeyboardPane{nullptr};
+static bool g_banditKeyboardFocusEntered = false;
 static winrt::event_token g_banditKeyboardTextRequested{};
 static winrt::event_token g_banditKeyboardSelectionRequested{};
 static winrt::event_token g_banditKeyboardTextUpdating{};
@@ -1028,22 +1038,36 @@ static void NotifyBanditKeyboardChanged(int oldStart, int oldEnd, int newLength,
             CoreTextRange{selectionStart, selectionEnd});
         g_banditKeyboardContext.NotifySelectionChanged(CoreTextRange{selectionStart, selectionEnd});
     } catch (...) {
+        // notify throws once the view is gone
     }
 }
 
 static void EndBanditKeyboard(bool markClosed) {
+    bool leaveFocus = false;
     {
         std::lock_guard<std::mutex> lock(g_banditKeyboardMutex);
         if (markClosed && g_banditKeyboardActive) g_banditKeyboardFlags |= BANDIT_KEYBOARD_CLOSED;
         g_banditKeyboardActive = false;
         g_banditKeyboardWasVisible = false;
+        leaveFocus = g_banditKeyboardFocusEntered;
+        g_banditKeyboardFocusEntered = false;
     }
+    if (!leaveFocus) return;
+
+    // focus enter and leave have to pair, and b already tore it down from the window key handler
     if (g_banditKeyboardContext) {
+        ShimLog("Bandit native keyboard teardown: notify focus leave");
         try { g_banditKeyboardContext.NotifyFocusLeave(); } catch (...) {}
     }
     if (g_banditKeyboardPane) {
-        try { g_banditKeyboardPane.TryHide(); } catch (...) {}
+        bool visible = false;
+        try { visible = g_banditKeyboardPane.Visible(); } catch (...) {}
+        if (visible) {
+            ShimLog("Bandit native keyboard teardown: hiding pane");
+            try { g_banditKeyboardPane.TryHide(); } catch (...) {}
+        }
     }
+    ShimLog("Bandit native keyboard teardown complete");
 }
 
 static void RefreshBanditKeyboardVisibility() {
@@ -1251,7 +1275,11 @@ static bool CreateBanditKeyboardContext() {
                 }
             });
 
-        try { g_banditKeyboardPane = winrt::Windows::UI::ViewManagement::InputPane::GetForCurrentView(); } catch (...) {}
+        try {
+            g_banditKeyboardPane = winrt::Windows::UI::ViewManagement::InputPane::GetForCurrentView();
+        } catch (...) {
+            ShimLog("Bandit native keyboard input pane unavailable, visibility tracking disabled");
+        }
         ShimLog("Bandit native keyboard context ready");
         return true;
     } catch (winrt::hresult_error const& error) {
@@ -1276,6 +1304,7 @@ static void DestroyBanditKeyboardContext() {
             g_banditKeyboardContext.LayoutRequested(g_banditKeyboardLayoutRequested);
             g_banditKeyboardContext.FocusRemoved(g_banditKeyboardFocusRemoved);
         } catch (...) {
+            // revoking throws if the context is already dead
         }
     }
     g_banditKeyboardContext = nullptr;
@@ -1328,6 +1357,10 @@ extern "C" __declspec(dllexport) int banditKeyboardBegin(
         using namespace winrt::Windows::UI::Text::Core;
         g_banditKeyboardContext.InputScope(CoreTextInputScope::Text);
         g_banditKeyboardContext.NotifyFocusEnter();
+        {
+            std::lock_guard<std::mutex> lock(g_banditKeyboardMutex);
+            g_banditKeyboardFocusEntered = true;
+        }
         NotifyBanditKeyboardChanged(0, oldLength, newLength, newSelectionStart, newSelectionEnd);
         if (g_banditKeyboardPane) g_banditKeyboardPane.TryShow();
         ShimLog("Bandit native keyboard opened length=%d multiline=%d", newLength, multiline ? 1 : 0);
@@ -1798,7 +1831,7 @@ static bool UseRawScaledFramebuffer() {
     return !EnvFlagDisabled(L"MC_USE_RAW_SCALED_FRAMEBUFFER");
 }
 
-static void GetDisplayScale(double& scaleX, double& scaleY) {
+static void QueryDisplayScale(double& scaleX, double& scaleY) {
     scaleX = 1.0;
     scaleY = 1.0;
 
@@ -1843,6 +1876,21 @@ static void GetDisplayScale(double& scaleX, double& scaleY) {
         scaleX = logicalDpi / 96.0;
         scaleY = logicalDpi / 96.0;
     }
+}
+
+// called every frame from RefreshWindowMetrics, the factory lookup is not cheap
+static void GetDisplayScale(double& scaleX, double& scaleY) {
+    static double cachedX = 1.0;
+    static double cachedY = 1.0;
+    static ULONGLONG lastQuery = 0;
+
+    const ULONGLONG now = GetTickCount64();
+    if (lastQuery == 0 || (now - lastQuery) >= kDisplayScaleCacheMs) {
+        QueryDisplayScale(cachedX, cachedY);
+        lastQuery = now;
+    }
+    scaleX = cachedX;
+    scaleY = cachedY;
 }
 
 static void RefreshWindowMetrics(bool fireCallbacks) {
@@ -2168,13 +2216,13 @@ static void DispatchCursorPosInternal(double x, double y, bool updateOverlayPosi
     g_cursor_x = x;
     g_cursor_y = y;
 
-    
-    
-    
-    
-    
-    
-    
+
+
+
+
+
+
+
     if (g_cursorMode != GLFW_CURSOR_DISABLED && updateOverlayPosition) {
         g_menu_abs_x = g_cursor_x;
         g_menu_abs_y = g_cursor_y;
@@ -2880,7 +2928,7 @@ static IClipboardStatics* GetClipboardStatics() {
     GetActivationFactory(
         HStringReference(RuntimeClass_Windows_ApplicationModel_DataTransfer_Clipboard).Get(),
         &statics);
-    return statics; 
+    return statics;
 }
 
 extern "C" __declspec(dllexport) void glfwTerminate(void) {
@@ -3167,7 +3215,7 @@ extern "C" __declspec(dllexport) void glfwPollEvents(void) {
     PushMouseHostState();
     const bool mouseCompanionActive = MouseCompanionActive();
     if (!mouseCompanionActive && g_mouse_active_latched) {
-      
+
         FlushMouseButtonsForDeactivate();
     }
     g_mouse_active_latched = mouseCompanionActive;
@@ -3230,8 +3278,8 @@ extern "C" __declspec(dllexport) void glfwSetInputMode(GLFWwindow*, int mode, in
         DispatchCursorPos(g_menu_abs_x, g_menu_abs_y);
     }
     if (value == GLFW_CURSOR_NORMAL) {
-        
-        
+
+
         SendMouseRelayCursorSync(WindowToProtocolX(g_menu_abs_x), WindowToProtocolY(g_menu_abs_y));
         SendMouseRelayWindowCursorSync(g_menu_abs_x, g_menu_abs_y);
     }
@@ -3408,7 +3456,7 @@ extern "C" __declspec(dllexport) const char* glfwGetClipboardString(GLFWwindow*)
         return g_clipboard_buf;
     }
 
-    
+
     boolean hasText = FALSE;
     {
         HSTRING fmtText = nullptr;
@@ -3424,15 +3472,15 @@ extern "C" __declspec(dllexport) const char* glfwGetClipboardString(GLFWwindow*)
         return g_clipboard_buf;
     }
 
-    
-    
+
+
     ComPtr<IAsyncInfo> asyncInfo;
     if (FAILED(asyncOp.As(&asyncInfo)) || !asyncInfo) {
         ShimLog("Clipboard: IAsyncInfo QI failed");
         return g_clipboard_buf;
     }
 
-    
+
     AsyncStatus status = AsyncStatus::Started;
     for (int i = 0; i < 200 && status == AsyncStatus::Started; ++i) {
         asyncInfo->get_Status(&status);
@@ -3464,7 +3512,7 @@ extern "C" __declspec(dllexport) const char* glfwGetClipboardString(GLFWwindow*)
 extern "C" __declspec(dllexport) void glfwSetClipboardString(GLFWwindow*, const char* text) {
     if (!text) return;
 
-    
+
     const int wlen = MultiByteToWideChar(CP_UTF8, 0, text, -1, nullptr, 0);
     if (wlen <= 0) return;
     std::vector<wchar_t> wtext(wlen);
@@ -3473,7 +3521,7 @@ extern "C" __declspec(dllexport) void glfwSetClipboardString(GLFWwindow*, const 
     HSTRING hstr = nullptr;
     if (FAILED(WindowsCreateString(wtext.data(), (UINT32)(wlen - 1), &hstr))) return;
 
-    
+
     ComPtr<IDataPackage> pkg;
     {
         ComPtr<IInspectable> insp;
@@ -3495,7 +3543,7 @@ extern "C" __declspec(dllexport) void glfwSetClipboardString(GLFWwindow*, const 
         ShimLog("Clipboard: SetContent failed");
         return;
     }
-    
+
     clip->Flush();
     ShimLog("Clipboard: copy %d chars", (int)strlen(text));
 }

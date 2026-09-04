@@ -48,6 +48,7 @@ struct MinecraftVersionInfo {
     std::wstring loaderJar;
     std::wstring clientJar;
     std::wstring bundledModsDir;
+    std::wstring missingBundledModsDir;
     bool supported = false;
 };
 

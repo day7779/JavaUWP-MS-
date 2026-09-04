@@ -20,8 +20,8 @@ $jarTmp = Join-Path $tmp "jar"
 $patchedLoader = Join-Path $tmp "fabric-loader-$loaderVersion-patched.jar"
 
 Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
-New-Item -ItemType Directory -Force $classesTmp | Out-Null
-New-Item -ItemType Directory -Force $jarTmp | Out-Null
+Ensure-Dir $classesTmp
+Ensure-Dir $jarTmp
 
 if (-not (Test-Path $loader)) {
     throw "Fabric loader jar not found: $loader"
@@ -62,7 +62,7 @@ $classFiles = Get-ChildItem -LiteralPath $classesTmp -Recurse -Filter "*.class"
 foreach ($classFile in $classFiles) {
     $relativePath = $classFile.FullName.Substring($classesTmp.Length).TrimStart('\', '/')
     $dst = Join-Path $jarTmp $relativePath
-    New-Item -ItemType Directory -Force -Path (Split-Path $dst -Parent) | Out-Null
+    Ensure-Dir (Split-Path $dst -Parent)
     Copy-Item -LiteralPath $classFile.FullName -Destination $dst -Force
     Write-Host "  injected $($relativePath.Replace('\', '/'))"
 }

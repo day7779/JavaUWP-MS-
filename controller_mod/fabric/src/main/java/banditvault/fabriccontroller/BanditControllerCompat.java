@@ -145,13 +145,6 @@ public final class BanditControllerCompat {
         RenderSystem.enableDepthTest();
     }
 
-    public static void renderCursorOverlay(class_310 client) {
-        if (client == null || client.field_1755 == null) {
-            return;
-        }
-        renderCursor(client.field_1755, new class_4587());
-    }
-
     public static int screenMouseX(int fallback) {
         if (!active || cursorX < 0.0) {
             return fallback;

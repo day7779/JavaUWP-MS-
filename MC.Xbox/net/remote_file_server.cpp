@@ -1,4 +1,4 @@
-﻿#include "remote_file_server.h"
+#include "remote_file_server.h"
 
 #include "http_client.h"
 #include "launcher_common.h"
@@ -194,15 +194,16 @@ static std::string GuessDownloadContentType(const std::wstring& name) {
     return "application/octet-stream";
 }
 
-static std::string GenerateRemotePin() {
+static bool GenerateRemotePin(std::string& pin) {
     unsigned value = 0;
     if (BCryptGenRandom(nullptr, reinterpret_cast<PUCHAR>(&value), sizeof(value), BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0) {
-        value = static_cast<unsigned>(GetTickCount64());
+        return false;
     }
     value = 100000 + (value % 900000);
-    char pin[16] = {};
-    sprintf_s(pin, "%06u", value);
-    return pin;
+    char buf[16] = {};
+    sprintf_s(buf, "%06u", value);
+    pin = buf;
+    return true;
 }
 
 class RemoteFileServer {
@@ -210,8 +211,13 @@ public:
     void Start(const std::wstring& runtimeRoot) {
         if (running_.load()) return;
         if (thread_.joinable()) thread_.join();
+        pin_.clear();
+        if (!GenerateRemotePin(pin_)) {
+            WriteLog(L"Remote file server not started, secure PIN generation failed");
+            return;
+        }
         runtimeRoot_ = runtimeRoot;
-        pin_ = GenerateRemotePin();
+        attempts_.clear();
         stop_.store(false);
         running_.store(true);
         thread_ = std::thread([this]() { ThreadMain(); });
@@ -236,8 +242,12 @@ public:
     std::string Pin() const { return pin_; }
     int Port() const { return port_; }
 
+    std::wstring BaseUrl() const {
+        return L"http://" + a2w(LocalAddress().c_str()) + L":" + std::to_wstring(port_);
+    }
+
     std::wstring Url() const {
-        return L"http://" + a2w(LocalAddress().c_str()) + L":" + std::to_wstring(port_) + L"/?pin=" + a2w(pin_.c_str());
+        return BaseUrl() + L"/?pin=" + a2w(pin_.c_str());
     }
 
 private:
@@ -250,6 +260,19 @@ private:
     std::wstring runtimeRoot_;
     std::string pin_;
     int port_ = kPort;
+
+    struct PinAttempts {
+        int failures = 0;
+        int lockouts = 0;
+        unsigned long long lockedUntilMs = 0;
+    };
+
+    static constexpr int kMaxPinAttempts = 10;
+    static constexpr unsigned long long kPinLockoutBaseMs = 30ull * 1000ull;
+    static constexpr unsigned long long kPinLockoutMaxMs = 15ull * 60ull * 1000ull;
+
+    // only touched from the accept loop thread, which handles one client at a time
+    std::map<unsigned long, PinAttempts> attempts_;
 
     std::string LocalAddress() const {
         char host[256] = {};
@@ -320,7 +343,7 @@ private:
         }
 
         listenSocket_.store(s);
-        WriteLogF(L"Remote file server started url=%s pin=%s", Url().c_str(), a2w(pin_.c_str()).c_str());
+        WriteLogF(L"Remote file server started url=%s", BaseUrl().c_str());
 
         while (!stop_.load()) {
             fd_set readSet;
@@ -331,14 +354,16 @@ private:
             tv.tv_usec = 250000;
             const int ready = select(0, &readSet, nullptr, nullptr, &tv);
             if (ready <= 0) continue;
-            SOCKET client = accept(s, nullptr, nullptr);
+            sockaddr_in peerAddr = {};
+            int peerLen = static_cast<int>(sizeof(peerAddr));
+            SOCKET client = accept(s, reinterpret_cast<sockaddr*>(&peerAddr), &peerLen);
             if (client == INVALID_SOCKET) continue;
             if (stop_.load()) {
                 closesocket(client);
                 break;
             }
             clientSocket_.store(client);
-            HandleClient(client);
+            HandleClient(client, peerAddr.sin_addr.s_addr);
             clientSocket_.compare_exchange_strong(client, INVALID_SOCKET);
             closesocket(client);
         }
@@ -412,6 +437,44 @@ private:
         return body.find("name=\"pin\"\r\n\r\n" + pin_) != std::string::npos;
     }
 
+    static bool SuppliedPin(const std::string& query, const std::string& body) {
+        if (!QueryValue(query, "pin").empty()) return true;
+        return body.find("name=\"pin\"\r\n\r\n") != std::string::npos;
+    }
+
+    static std::string FormatPeer(unsigned long peer) {
+        in_addr addr = {};
+        addr.s_addr = static_cast<ULONG>(peer);
+        char ip[INET_ADDRSTRLEN] = {};
+        if (!inet_ntop(AF_INET, &addr, ip, sizeof(ip))) return "unknown";
+        return ip;
+    }
+
+    bool PeerLockedOut(unsigned long peer) {
+        auto it = attempts_.find(peer);
+        if (it == attempts_.end() || it->second.lockedUntilMs == 0) return false;
+        if (GetTickCount64() < it->second.lockedUntilMs) return true;
+        it->second.lockedUntilMs = 0;
+        it->second.failures = 0;
+        return false;
+    }
+
+    void NotePinFailure(unsigned long peer) {
+        PinAttempts& state = attempts_[peer];
+        if (++state.failures < kMaxPinAttempts) return;
+        state.failures = 0;
+        const unsigned long long lockMs =
+            (std::min)(kPinLockoutBaseMs << (std::min)(state.lockouts, 5), kPinLockoutMaxMs);
+        ++state.lockouts;
+        state.lockedUntilMs = GetTickCount64() + lockMs;
+        WriteLogF(L"Remote file server locked out %s for %llus after %d wrong PINs",
+            a2w(FormatPeer(peer).c_str()).c_str(), lockMs / 1000ull, kMaxPinAttempts);
+    }
+
+    void NotePinSuccess(unsigned long peer) {
+        attempts_.erase(peer);
+    }
+
     static std::string FormatBytes(unsigned long long bytes) {
         if (bytes < 1024ull) return std::to_string(bytes) + " B";
         if (bytes < 1024ull * 1024ull) return std::to_string(bytes / 1024ull) + " KB";
@@ -447,7 +510,7 @@ private:
         return html.str();
     }
 
-    void HandleClient(SOCKET s) {
+    void HandleClient(SOCKET s, unsigned long peer) {
         std::string request;
         std::string body;
         std::map<std::string, std::string> headers;
@@ -465,7 +528,16 @@ private:
         const std::string path = q == std::string::npos ? target : target.substr(0, q);
         const std::string query = q == std::string::npos ? std::string() : target.substr(q + 1);
 
+        if (PeerLockedOut(peer)) {
+            SendHttpResponse(s, 429, "Too Many Requests", "text/html; charset=utf-8",
+                Layout("Bandit Remote Files",
+                    "<div class=\"card\"><h1>Too many attempts</h1>"
+                    "<p class=\"muted\">Too many wrong PINs from this device. Wait and try again, or reopen the remote files page on your Xbox for a new PIN.</p></div>"));
+            return;
+        }
+
         if (!Authorized(query, body)) {
+            if (SuppliedPin(query, body)) NotePinFailure(peer);
             std::string form = "<div class=\"top\"><div><h1>Bandit Remote Files</h1><p class=\"muted\">Enter the PIN shown on your Xbox to manage files on this device.</p></div></div>"
                 "<div class=\"card\"><form method=\"get\">"
                 "<div class=\"field\"><label for=\"pin\">PIN</label><input id=\"pin\" name=\"pin\" inputmode=\"numeric\" pattern=\"[0-9]{6}\" maxlength=\"6\" autofocus></div>"
@@ -473,6 +545,7 @@ private:
             SendHttpResponse(s, 401, "Unauthorized", "text/html; charset=utf-8", Layout("Bandit Remote Files", form));
             return;
         }
+        NotePinSuccess(peer);
 
         if (method == "GET" && path == "/") {
             SendHttpResponse(s, 200, "OK", "text/html; charset=utf-8", Layout("Bandit Launcher", HomeHtml(query)));

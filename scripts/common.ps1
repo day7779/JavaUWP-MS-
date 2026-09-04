@@ -2,6 +2,13 @@ $ErrorActionPreference = "Stop"
 
 . (Join-Path $PSScriptRoot "config.ps1")
 
+# /external:W0 needs /external:anglebrackets or the sdk headers drown out ours at /W4
+$CommonClFlags = @(
+    "/W4",
+    "/external:anglebrackets",
+    "/external:W0"
+)
+
 function Resolve-RepoRoot {
     return (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 }
@@ -90,12 +97,12 @@ function Get-JavaHomeCandidates {
     }
 
     $directRoots = @(
-        "C:\ms-jdk$MajorVersion",
-        "C:\Program Files\Java",
-        "C:\Program Files\Eclipse Adoptium",
-        "C:\Program Files\Amazon Corretto",
-        "C:\Program Files\Microsoft",
-        "C:\"
+        "$env:SystemDrive\ms-jdk$MajorVersion",
+        "$env:SystemDrive\Program Files\Java",
+        "$env:SystemDrive\Program Files\Eclipse Adoptium",
+        "$env:SystemDrive\Program Files\Amazon Corretto",
+        "$env:SystemDrive\Program Files\Microsoft",
+        "$env:SystemDrive\"
     )
 
     foreach ($root in $directRoots | Select-Object -Unique) {
@@ -167,6 +174,136 @@ function Resolve-JavaHome {
 }
 
 $script:MinecraftJavaMajorCache = @{}
+$script:RemoteJsonCache = @{}
+
+# only version_manifest_v2 is mutable, the rest is content addressed, hence the ttl
+$script:MutableMetadataUrls = @(
+    "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json"
+)
+$script:MutableMetadataTtlHours = 24
+
+function Get-CachedRemoteJson {
+    param(
+        [Parameter(Mandatory = $true)][string]$Uri,
+        [int]$TimeoutSec = 60
+    )
+
+    if ($script:RemoteJsonCache.ContainsKey($Uri)) {
+        return $script:RemoteJsonCache[$Uri]
+    }
+
+    $cacheDir = Get-ConfigPath "MetadataCacheDir"
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $hash = [System.BitConverter]::ToString($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($Uri))).Replace("-", "")
+    } finally {
+        $sha.Dispose()
+    }
+    $cacheFile = Join-Path $cacheDir ($hash.Substring(0, 32) + ".json")
+
+    $mutable = $script:MutableMetadataUrls -contains $Uri
+    if (Test-Path $cacheFile) {
+        $stale = $false
+        if ($mutable) {
+            $age = (Get-Date) - (Get-Item $cacheFile).LastWriteTime
+            $stale = $age.TotalHours -ge $script:MutableMetadataTtlHours
+        }
+        if (-not $stale) {
+            try {
+                $cached = [System.IO.File]::ReadAllText($cacheFile) | ConvertFrom-Json
+                $script:RemoteJsonCache[$Uri] = $cached
+                return $cached
+            } catch {
+                Remove-Item -Force $cacheFile -ErrorAction SilentlyContinue
+            }
+        }
+    }
+
+    Write-Host "Fetch $Uri"
+    $raw = Invoke-WebRequest -UseBasicParsing -TimeoutSec $TimeoutSec -Uri $Uri
+    $text = if ($raw.Content -is [byte[]]) { [System.Text.Encoding]::UTF8.GetString($raw.Content) } else { [string]$raw.Content }
+    $parsed = $text | ConvertFrom-Json
+
+    Ensure-Dir $cacheDir
+    [System.IO.File]::WriteAllText($cacheFile, $text, (New-Object System.Text.UTF8Encoding($false)))
+    $script:RemoteJsonCache[$Uri] = $parsed
+    return $parsed
+}
+
+function Get-MinecraftVersionManifest {
+    return Get-CachedRemoteJson -Uri "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json"
+}
+
+function New-BuildStamp {
+    param(
+        [string[]]$Values = @(),
+        # content hashed so a checkout rewriting mtimes does not force a rebuild
+        [string[]]$ContentFiles = @(),
+        # build.ps1 repatches the loader jars every run, so dating them would bust every stamp
+        [string[]]$DependencyFiles = @(),
+        # sized only, the client jar alone is 40 MB per target
+        [string[]]$ImmutableFiles = @()
+    )
+
+    $lines = New-Object System.Collections.Generic.List[string]
+    foreach ($v in $Values) { $lines.Add("v|$v") }
+
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        foreach ($f in @($ContentFiles | Sort-Object -Unique)) {
+            if (-not (Test-Path -LiteralPath $f -PathType Leaf)) { $lines.Add("c|$f|missing"); continue }
+            $bytes = [System.IO.File]::ReadAllBytes($f)
+            $hash = [System.BitConverter]::ToString($sha.ComputeHash($bytes)).Replace("-", "")
+            $lines.Add("c|$f|$hash")
+        }
+
+        foreach ($f in @($DependencyFiles | Sort-Object -Unique)) {
+            if (-not (Test-Path -LiteralPath $f -PathType Leaf)) { $lines.Add("d|$f|missing"); continue }
+            $item = Get-Item -LiteralPath $f
+            $lines.Add("d|$f|$($item.Length)|$($item.LastWriteTimeUtc.Ticks)")
+        }
+
+        foreach ($f in @($ImmutableFiles | Sort-Object -Unique)) {
+            if (-not (Test-Path -LiteralPath $f -PathType Leaf)) { $lines.Add("i|$f|missing"); continue }
+            $lines.Add("i|$f|$((Get-Item -LiteralPath $f).Length)")
+        }
+
+        $joined = [string]::Join("`n", $lines)
+        return [System.BitConverter]::ToString($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($joined))).Replace("-", "")
+    } finally {
+        $sha.Dispose()
+    }
+}
+
+function Test-BuildStampCurrent {
+    param(
+        [Parameter(Mandatory = $true)][string]$StampPath,
+        [Parameter(Mandatory = $true)][string]$Stamp,
+        [string[]]$RequiredOutputs = @()
+    )
+
+    if ($env:BANDIT_FORCE_REBUILD) { return $false }
+    if (-not (Test-Path -LiteralPath $StampPath -PathType Leaf)) { return $false }
+    foreach ($o in $RequiredOutputs) {
+        if (-not (Test-Path -LiteralPath $o -PathType Leaf)) { return $false }
+    }
+
+    try {
+        return ([System.IO.File]::ReadAllText($StampPath).Trim() -eq $Stamp)
+    } catch {
+        return $false
+    }
+}
+
+function Set-BuildStamp {
+    param(
+        [Parameter(Mandatory = $true)][string]$StampPath,
+        [Parameter(Mandatory = $true)][string]$Stamp
+    )
+
+    Ensure-Dir (Split-Path $StampPath -Parent)
+    [System.IO.File]::WriteAllText($StampPath, $Stamp, (New-Object System.Text.UTF8Encoding($false)))
+}
 
 function Get-MinecraftJavaMajorVersion {
     param(
@@ -180,11 +317,10 @@ function Get-MinecraftJavaMajorVersion {
 
     $major = [int]$ProjectConfig.JavaRelease
     try {
-        $manifest = Invoke-RestMethod -UseBasicParsing -TimeoutSec 60 `
-            -Uri "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json"
+        $manifest = Get-MinecraftVersionManifest
         $entry = $manifest.versions | Where-Object { $_.id -eq $MinecraftVersion } | Select-Object -First 1
         if ($entry) {
-            $versionJson = Invoke-RestMethod -UseBasicParsing -TimeoutSec 60 -Uri $entry.url
+            $versionJson = Get-CachedRemoteJson -Uri $entry.url
             if ($versionJson.javaVersion -and $versionJson.javaVersion.majorVersion) {
                 $major = [int]$versionJson.javaVersion.majorVersion
             }
@@ -244,7 +380,7 @@ function Resolve-SpongeMixinJar {
         Select-Object -First 1
     if ($newest) { return $newest.FullName }
 
-    throw "sponge-mixin jar not found under $GameDir. Run scripts\prepare-ci-cache.ps1 for this target first."
+    throw "sponge-mixin jar not found under $GameDir. Run scripts\setup.ps1 for this target first."
 }
 
 function Test-FabricTargetHasIntermediary {
@@ -278,39 +414,6 @@ function Resolve-FabricClientJar {
     if (Test-Path $remapped) { return $remapped }
 
     return (Join-Path $GameDir "versions\$MinecraftVersion\$MinecraftVersion.jar")
-}
-
-function Resolve-Python {
-    if ($env:PYTHON) {
-        if (Test-Path $env:PYTHON) {
-            return (Resolve-Path $env:PYTHON).Path
-        }
-
-        throw "PYTHON is set but does not point to a valid executable: $env:PYTHON"
-    }
-
-    $pythonCandidates = @(
-        "C:\Users\Dan\AppData\Local\Programs\Python\Python314\python.exe",
-        "C:\Program Files\Python314\python.exe"
-    )
-
-    foreach ($candidate in $pythonCandidates) {
-        if (Test-Path $candidate) {
-            return (Resolve-Path $candidate).Path
-        }
-    }
-
-    $pyLauncher = Get-Command py -ErrorAction SilentlyContinue
-    if ($pyLauncher) {
-        return $pyLauncher.Source
-    }
-
-    $python = Get-Command python -ErrorAction SilentlyContinue
-    if ($python) {
-        return $python.Source
-    }
-
-    throw "No suitable Python installation found. Set PYTHON to a Python 3 install with Pillow or install Python 3."
 }
 
 function Resolve-VSTools {
@@ -422,7 +525,13 @@ function Resolve-MesaRuntimeDir {
         $candidates += $env:RETROARCH_UWP_DIR
     }
 
-    $searchRoots = @("X:\WindowsApps", "S:\Program Files\WindowsApps")
+    $searchRoots = @()
+    foreach ($drive in Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue) {
+        if ($drive.Name.Length -ne 1) { continue }
+        $searchRoots += "$($drive.Name):\WindowsApps"
+        $searchRoots += "$($drive.Name):\Program Files\WindowsApps"
+    }
+
     foreach ($root in $searchRoots) {
         if (-not (Test-Path $root)) { continue }
 
@@ -459,4 +568,31 @@ function Get-ConfigPath {
     }
 
     return (Get-ProjectPath $ProjectConfig[$Name])
+}
+
+function Test-MinecraftVersionAtLeast {
+    param(
+        [Parameter(Mandatory = $true)][string]$Version,
+        [Parameter(Mandatory = $true)][string]$Minimum
+    )
+
+    $versionParts = $Version.Split('.') | ForEach-Object { [int]$_ }
+    $minimumParts = $Minimum.Split('.') | ForEach-Object { [int]$_ }
+    $count = [Math]::Max($versionParts.Length, $minimumParts.Length)
+    for ($i = 0; $i -lt $count; $i++) {
+        $value = if ($i -lt $versionParts.Length) { $versionParts[$i] } else { 0 }
+        $minimumValue = if ($i -lt $minimumParts.Length) { $minimumParts[$i] } else { 0 }
+        if ($value -gt $minimumValue) { return $true }
+        if ($value -lt $minimumValue) { return $false }
+    }
+    return $true
+}
+
+function Ensure-Dir {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]]$Path
+    )
+
+    New-Item -ItemType Directory -Force -Path $Path | Out-Null
 }

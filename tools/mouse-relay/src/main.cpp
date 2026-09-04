@@ -105,6 +105,9 @@ static void SleepUntil(double deadline) {
         // sleep the bulk, spin the last ~1ms since SDL_Delay only resolves to the timer tick
         if (remaining > 0.002) {
             SDL_Delay(static_cast<Uint32>((remaining - 0.001) * 1000.0));
+        } else {
+            // an empty spin burns a core at 240hz with the thread at time critical
+            std::this_thread::yield();
         }
     }
 }
@@ -1686,7 +1689,8 @@ private:
             }
         }
 
-        const bool motionDue = motionPending_ && (now - lastMotionSend_) >= kSendIntervalSeconds;
+        // no time gate, the loop already ticks at this interval and a late wake doubles up
+        const bool motionDue = motionPending_;
         const bool heldRefreshDue = AnyLocalMouseButtonDown() && (now - lastHeldButtonRefresh_) >= kHeldButtonRefreshSeconds;
         if (heldRefreshDue) {
             packetButtons = buttonState_;
@@ -1708,7 +1712,6 @@ private:
             accumDx_ = 0.0f;
             accumDy_ = 0.0f;
             motionPending_ = false;
-            lastMotionSend_ = now;
             if (lastSendStamp_ > 0.0) {
                 const double dtMs = (now - lastSendStamp_) * 1000.0;
                 sendDtMinMs_ = std::min(sendDtMinMs_, dtMs);
@@ -1974,7 +1977,6 @@ private:
     bool motionPending_ = false;
     double connectStart_ = 0.0;
     double lastConnectProbe_ = 0.0;
-    double lastMotionSend_ = 0.0;
     double lastHeldButtonRefresh_ = 0.0;
     double lastTouchScrollRepeat_ = 0.0;
     double lastPing_ = 0.0;

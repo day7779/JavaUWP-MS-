@@ -11,7 +11,7 @@ $ErrorActionPreference = "Stop"
 $root = Resolve-RepoRoot
 $gameDir = Get-ConfigPath "GameDir"
 $libraryDir = Join-Path $gameDir "libraries"
-$profilePath = Join-Path $root "build\forge-install-profile.json"
+$profilePath = Join-Path $root "config\forge-install-profile.json"
 if (-not (Test-Path $profilePath)) {
     throw "Forge install profile missing at $profilePath"
 }
@@ -38,7 +38,7 @@ function Ensure-LibraryArtifact {
     param([Parameter(Mandatory = $true)]$Artifact)
     $dest = Join-Path $libraryDir ($Artifact.path.Replace("/", "\"))
     if (Test-Path $dest) { return $dest }
-    New-Item -ItemType Directory -Force -Path (Split-Path $dest -Parent) | Out-Null
+    Ensure-Dir (Split-Path $dest -Parent)
     Write-Host "Downloading $($Artifact.path)"
     Invoke-WebRequest -UseBasicParsing -Uri $Artifact.url -OutFile $dest
     return $dest
@@ -99,12 +99,12 @@ if (-not (Test-Path $installerJar)) {
     if (-not (Test-Path $installerSrc)) {
         throw "Forge installer jar missing at $installerSrc"
     }
-    New-Item -ItemType Directory -Force -Path (Split-Path $installerJar) | Out-Null
+    Ensure-Dir (Split-Path $installerJar)
     Copy-Item $installerSrc $installerJar -Force
 }
 
 if (-not (Test-Path $binPatch)) {
-    New-Item -ItemType Directory -Force -Path (Split-Path $binPatch) | Out-Null
+    Ensure-Dir (Split-Path $binPatch)
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $zip = [System.IO.Compression.ZipFile]::OpenRead($installerJar)
     try {

@@ -1,4 +1,4 @@
-﻿#include "runtime_manager.h"
+#include "runtime_manager.h"
 
 #include "loader.h"
 #include "launcher_common.h"
@@ -176,13 +176,13 @@ static bool IsBanditControllerJarName(const std::wstring& fileName) {
 
 static bool IsControlifyJarName(const std::wstring& fileName) {
     const std::wstring lower = ToLowerW(fileName);
-    return lower.size() > 4 &&
-        lower.compare(lower.size() - 4, 4, L".jar") == 0 &&
-        lower.rfind(L"controlify", 0) == 0;
-		lower.rfind(L"lambdacontrols", 0) == 0;
-		lower.rfind(L"lambda-controls", 0) == 0;
-		lower.rfind(L"midnightcontrols", 0) == 0;
-		lower.rfind(L"midnight-controls", 0) == 0;
+    if (lower.size() <= 4) return false;
+    if (lower.compare(lower.size() - 4, 4, L".jar") != 0) return false;
+    return lower.rfind(L"controlify", 0) == 0 ||
+        lower.rfind(L"lambdacontrols", 0) == 0 ||
+        lower.rfind(L"lambda-controls", 0) == 0 ||
+        lower.rfind(L"midnightcontrols", 0) == 0 ||
+        lower.rfind(L"midnight-controls", 0) == 0;
 }
 
 int DeleteBanditControllerModsFromDir(const std::wstring& modsDir) {
@@ -406,9 +406,7 @@ done:
 }
 
 bool FileMatchesSha1(const std::wstring& path, const std::string& expectedSha1) {
-    if (expectedSha1.empty()) {
-        return GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES;
-    }
+    if (expectedSha1.empty()) return false;
 
     std::string actual;
     if (!Sha1File(path, &actual)) return false;
@@ -456,39 +454,25 @@ bool ReadDownloadManifest(const std::wstring& path, std::vector<DownloadManifest
     return true;
 }
 
-static void CollectManifestLibraryJars(
-    const std::wstring& manifestPath,
-    const std::wstring& runtimeRoot,
-    const std::wstring& packageDir,
-    std::vector<std::wstring>& jars) {
-    std::vector<DownloadManifestEntry> entries;
-    if (!ReadDownloadManifest(manifestPath, entries)) return;
-    for (const auto& e : entries) {
-        std::wstring rel = e.relativePath;
-        std::replace(rel.begin(), rel.end(), L'\\', L'/');
-        for (wchar_t& c : rel) c = static_cast<wchar_t>(towlower(c));
-        if (rel.rfind(L"game/libraries/", 0) != 0) continue;
-        if (rel.size() < 4 || rel.compare(rel.size() - 4, 4, L".jar") != 0) continue;
-        if (rel.find(L"-natives-") != std::wstring::npos) continue;
-        if (rel.find(L"-installer.jar") != std::wstring::npos) continue;
-        const std::wstring libraryRelative = e.relativePath.substr(wcslen(L"game\\libraries\\"));
-        const std::wstring packagedOverride = packageDir + L"\\runtime\\libraries\\" + libraryRelative;
-        const std::wstring abs =
-            GetFileAttributesW(packagedOverride.c_str()) != INVALID_FILE_ATTRIBUTES
-                ? packagedOverride
-                : JoinRuntimeRelativePath(runtimeRoot, e.relativePath);
-        if (!abs.empty()) jars.push_back(abs);
-    }
-}
-
-
 void ArchiveCurrentLogsToPrevious(const std::wstring& runtimeRoot) {
     const std::wstring current = LogsCurrentDir(runtimeRoot);
     const std::wstring previous = LogsPreviousDir(runtimeRoot);
     DeleteDirectoryTree(previous);
     EnsureDirectoryTree(previous);
 
-    const wchar_t* logNames[] = {
+    // sweep the folder, a name list silently misses gc.log and the hud dumps
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW((current + L"\\*").c_str(), &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
+            MovePathIfExists(current + L"\\" + fd.cFileName, previous + L"\\" + fd.cFileName);
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+    }
+
+    // runtimeRoot also holds jvm_args.txt and the patch jars, so this leg stays named
+    const wchar_t* legacyStrayNames[] = {
         L"mc_launch.log",
         L"java_output.log",
         L"stderr_stream.log",
@@ -497,8 +481,7 @@ void ArchiveCurrentLogsToPrevious(const std::wstring& runtimeRoot) {
         L"hwnd.txt"
     };
 
-    for (const wchar_t* name : logNames) {
-        MovePathIfExists(current + L"\\" + name, previous + L"\\" + name);
+    for (const wchar_t* name : legacyStrayNames) {
         MovePathIfExists(runtimeRoot + L"\\" + name, previous + L"\\" + name);
     }
 
@@ -1195,9 +1178,14 @@ MinecraftVersionInfo ResolveVersionInfo(const std::wstring& packageDir, const st
         info.bundledModsDir = perVersionMods;
     } else if (isDefault) {
         info.bundledModsDir = packageDir + L"\\runtime\\bundled-mods";
+    } else {
+        info.missingBundledModsDir = perVersionMods;
+        WriteLogF(L"No bundled mods for target %s, expected %s", target.targetId.c_str(), perVersionMods.c_str());
     }
 
     LoaderFinalizeVersionInfo(info, target, packageDir, def);
+    // every loader finalizer assigns supported outright, so this lands after the call
+    if (!info.missingBundledModsDir.empty()) info.supported = false;
     return info;
 }
 

@@ -1,6 +1,5 @@
 # Build outputs
 /build/*
-!/build/forge-install-profile.json
 /runtime/
 /META-INF/
 /banditvault/
@@ -36,9 +35,6 @@
 /logs/
 *.log
 *.log.gz
-/java_output.log
-/mc_launch.log
-/glfw_uwp.log
 /hwnd.txt
 
 # Certificates / signed artifacts

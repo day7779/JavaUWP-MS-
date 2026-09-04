@@ -35,12 +35,10 @@ function Get-Json([string]$Url) {
     $lastError = $null
     for ($attempt = 1; $attempt -le 4; $attempt++) {
         try {
-            if ($attempt -eq 1) {
-                Write-Host "Fetch $Url"
-            } else {
-                Write-Host "Fetch $Url (retry $attempt)"
+            if ($attempt -gt 1) {
+                Write-Host "Retry $attempt for $Url"
             }
-            return Invoke-RestMethod -UseBasicParsing -Uri $Url -TimeoutSec 60
+            return Get-CachedRemoteJson -Uri $Url -TimeoutSec 60
         } catch {
             $lastError = $_
             if ($attempt -ge 4) {
@@ -65,17 +63,30 @@ function Convert-MavenNameToPath([string]$Name) {
     return "$group/$artifact/$version/$artifact-$version$classifier.jar"
 }
 
-function Get-RemoteTextOrEmpty([string]$Url) {
-    try {
-        $content = (Invoke-WebRequest -UseBasicParsing -Uri $Url -TimeoutSec 30).Content
-        if ($content -is [byte[]]) {
-            return [System.Text.Encoding]::ASCII.GetString($content).Trim()
+function Get-RemoteTextOrThrow([string]$Url) {
+    $lastError = $null
+    for ($attempt = 1; $attempt -le 4; $attempt++) {
+        try {
+            $content = (Invoke-WebRequest -UseBasicParsing -Uri $Url -TimeoutSec 30).Content
+            $text = if ($content -is [byte[]]) {
+                [System.Text.Encoding]::ASCII.GetString($content).Trim()
+            } else {
+                ([string]$content).Trim()
+            }
+            if ($text) {
+                return $text
+            }
+            $lastError = "empty response"
+        } catch {
+            $lastError = $_
         }
 
-        return ([string]$content).Trim()
-    } catch {
-        return ""
+        if ($attempt -lt 4) {
+            Start-Sleep -Seconds ([Math]::Min(2 * $attempt, 6))
+        }
     }
+
+    throw "Could not fetch $Url after 4 attempts: $lastError"
 }
 
 function Get-RemoteSizeOrZero([string]$Url) {
@@ -100,10 +111,13 @@ function Add-Entry(
     if (-not $Path -or -not $Url) {
         return
     }
+    if (-not $Sha1.Trim()) {
+        throw "No sha1 for manifest entry $Path from $Url"
+    }
 
     $Entries.Add([pscustomobject]@{
         Path = $Path.Replace("\", "/")
-        Sha1 = if ($Sha1) { $Sha1.Trim().ToLowerInvariant() } else { "" }
+        Sha1 = $Sha1.Trim().ToLowerInvariant()
         Size = $Size
         Url = $Url
     })
@@ -123,6 +137,10 @@ function Test-LibraryAllowed($Library) {
             }
             if ($rule.os.arch -and $rule.os.arch -notin @("x64", "amd64")) {
                 $applies = $false
+            }
+            # ignoring an unhandled os.version rule would put the wrong libraries on the classpath
+            if ($rule.os.version) {
+                throw "Library $($Library.name) has an os.version rule ($($rule.os.version)), which is not implemented."
             }
         }
 
@@ -168,7 +186,7 @@ function Add-FabricLibraries($FabricProfile, [System.Collections.Generic.List[ob
         }
 
         $url = "$baseUrl$path"
-        $sha1 = if ($library.sha1) { $library.sha1 } else { Get-RemoteTextOrEmpty "$url.sha1" }
+        $sha1 = if ($library.sha1) { $library.sha1 } else { Get-RemoteTextOrThrow "$url.sha1" }
         $size = if ($library.size) { [UInt64]$library.size } else { Get-RemoteSizeOrZero $url }
         Add-Entry $Entries "game/libraries/$path" $sha1 $size $url
     }
@@ -193,10 +211,53 @@ function Add-LoaderLibraries($LoaderProfile, [System.Collections.Generic.List[ob
         }
 
         $url = "$baseUrl$path"
-        $sha1 = if ($library.sha1) { $library.sha1 } else { Get-RemoteTextOrEmpty "$url.sha1" }
+        $sha1 = if ($library.sha1) { $library.sha1 } else { Get-RemoteTextOrThrow "$url.sha1" }
         $size = if ($library.size) { [UInt64]$library.size } else { Get-RemoteSizeOrZero $url }
         Add-Entry $Entries "game/libraries/$path" $sha1 $size $url
     }
+}
+
+function Get-LibraryCoordinate([string]$Path) {
+    if ($Path -notlike "game/libraries/*" -or $Path -notlike "*.jar") {
+        return $null
+    }
+    $segments = $Path.Split("/")
+    if ($segments.Count -lt 4) {
+        return $null
+    }
+    $file = $segments[-1]
+    $version = $segments[-2]
+    $artifact = $segments[-3]
+    $prefix = "$artifact-$version"
+    if (-not $file.StartsWith($prefix)) {
+        return $null
+    }
+    return (($segments[0..($segments.Count - 3)] -join "/") + $file.Substring($prefix.Length))
+}
+
+# vanilla ships its own asm on 1.21.2 to 1.21.10 and fabric will not start with two on the classpath
+function Resolve-LibraryVersionConflicts([System.Collections.Generic.List[object]]$Entries) {
+    $winners = @{}
+    foreach ($entry in $Entries) {
+        $coordinate = Get-LibraryCoordinate $entry.Path
+        if (-not $coordinate) {
+            continue
+        }
+        if ($winners.ContainsKey($coordinate) -and $winners[$coordinate].Path -ne $entry.Path) {
+            Write-Host "Library version conflict on ${coordinate}: keeping $($entry.Path), dropping $($winners[$coordinate].Path)"
+        }
+        $winners[$coordinate] = $entry
+    }
+
+    $kept = [System.Collections.Generic.List[object]]::new()
+    foreach ($entry in $Entries) {
+        $coordinate = Get-LibraryCoordinate $entry.Path
+        if ($coordinate -and $winners[$coordinate].Path -ne $entry.Path) {
+            continue
+        }
+        $kept.Add($entry)
+    }
+    return ,$kept
 }
 
 function Get-ZipJson([string]$JarPath, [string]$EntryName) {
@@ -226,7 +287,7 @@ function Save-ZipEntry([string]$JarPath, [string]$EntryName, [string]$OutputPath
         if (-not $entry) {
             throw "$EntryName not found in $JarPath"
         }
-        New-Item -ItemType Directory -Force -Path (Split-Path $OutputPath -Parent) | Out-Null
+        Ensure-Dir (Split-Path $OutputPath -Parent)
         [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $OutputPath, $true)
     } finally {
         $zip.Dispose()
@@ -251,7 +312,7 @@ function Add-InstallerMavenEntries(
 
             $path = $entry.FullName.Substring("maven/".Length)
             $url = "$BaseUrl$path"
-            $sha1 = Get-RemoteTextOrEmpty "$url.sha1"
+            $sha1 = Get-RemoteTextOrThrow "$url.sha1"
             Add-Entry $Entries "game/libraries/$path" $sha1 ([UInt64]$entry.Length) $url
         }
     } finally {
@@ -320,7 +381,7 @@ function Get-LoaderProfile([string]$Loader, [string]$MinecraftVersion, [string]$
     }
 
     $tmp = Join-Path ([System.IO.Path]::GetTempPath()) "MinecraftJavaUWP-loader-metadata"
-    New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+    Ensure-Dir $tmp
     if ($Loader -eq "forge") {
         $forgeVersion = Get-ForgeInstallerVersion $MinecraftVersion $LoaderVersion
         $jar = Join-Path $tmp "forge-$forgeVersion-installer.jar"
@@ -383,7 +444,7 @@ function Add-LoaderInstallerJarEntry(
         $forgeVersion = Get-ForgeInstallerVersion $MinecraftVersion $LoaderVersion
         $path = "net/minecraftforge/forge/$forgeVersion/forge-$forgeVersion-installer.jar"
         $url = "https://maven.minecraftforge.net/$path"
-        $sha1 = Get-RemoteTextOrEmpty "$url.sha1"
+        $sha1 = Get-RemoteTextOrThrow "$url.sha1"
         $size = Get-RemoteSizeOrZero $url
         Add-Entry $Entries "game/libraries/$path" $sha1 $size $url
         return
@@ -392,7 +453,7 @@ function Add-LoaderInstallerJarEntry(
     if ($Loader -eq "neoforge") {
         $path = "net/neoforged/neoforge/$LoaderVersion/neoforge-$LoaderVersion-installer.jar"
         $url = "https://maven.neoforged.net/releases/$path"
-        $sha1 = Get-RemoteTextOrEmpty "$url.sha1"
+        $sha1 = Get-RemoteTextOrThrow "$url.sha1"
         $size = Get-RemoteSizeOrZero $url
         Add-Entry $Entries "game/libraries/$path" $sha1 $size $url
     }
@@ -463,6 +524,8 @@ if ($versionJson.downloads.client_mappings) {
 Add-MinecraftLibraries $versionJson $entries
 if ($Loader -eq "fabric") {
     Add-FabricLibraries $loaderProfile $entries
+    # fabric only, forge and neoforge add their installer's older dupes last and would win here
+    $entries = Resolve-LibraryVersionConflicts $entries
 } elseif ($Loader -eq "forge") {
     Add-LoaderLibraries $loaderProfile $entries "https://maven.minecraftforge.net/"
     if ($installProfile) {
@@ -491,12 +554,7 @@ $deduped = $entries |
     ForEach-Object { $_.Group | Select-Object -First 1 } |
     Sort-Object Path
 
-$weakEntries = @($deduped | Where-Object { -not $_.Sha1 })
-if ($weakEntries.Count -gt 0) {
-    Write-Warning "$($weakEntries.Count) manifest entries do not have SHA1 metadata and will be existence-checked only."
-}
-
-New-Item -ItemType Directory -Force -Path (Split-Path $OutputPath -Parent) | Out-Null
+Ensure-Dir (Split-Path $OutputPath -Parent)
 $lines = [System.Collections.Generic.List[string]]::new()
 $lines.Add("# MinecraftJavaUWP official download manifest")
 $lines.Add("# minecraftVersion`t$MinecraftVersion")

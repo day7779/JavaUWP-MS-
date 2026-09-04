@@ -1,30 +1,14 @@
 minecraftVersion	displayName	loader	loaderVersion	javaRuntime	supportLevel	controllerProvider	notes
 26.2	26.2 Fabric	fabric	0.19.3	current	experimental	fabric	First calendar-versioned target; unobfuscated jar, Java 25, LWJGL 3.4.1
 1.21.11	1.21.11 Fabric	fabric	0.19.2	current	supported	fabric	Current launcher default with bundled controller support
-1.21.10	1.21.10 Fabric	fabric	0.19.2	java21	testing	fabric	Anchor for 1.21.10 Fabric mods
-1.21.9	1.21.9 Fabric	fabric	0.19.2	java21	testing	fabric	Anchor for 1.21.9 Fabric mods
-1.21.8	1.21.8 Fabric	fabric	0.19.2	java21	testing	fabric	Anchor for 1.21.8 Fabric mods
-1.21.7	1.21.7 Fabric	fabric	0.19.2	java21	testing	fabric	Anchor for 1.21.7 Fabric mods
-1.21.6	1.21.6 Fabric	fabric	0.19.2	java21	testing	fabric	Anchor for 1.21.6 Fabric mods
-1.21.5	1.21.5 Fabric	fabric	0.19.2	java21	testing	fabric	Anchor for 1.21.5 Fabric mods
 1.21.4	1.21.4 Fabric	fabric	0.19.2	java21	testing	fabric	Anchor for 1.21.4 Fabric mods with bundled controller support
 1.21.4	1.21.4 NeoForge	neoforge	21.4.137	java21	experimental	none	Anchor for 1.21.4 NeoForge mods
-1.21.3	1.21.3 Fabric	fabric	0.19.2	java21	testing	fabric	Anchor for 1.21.3 Fabric mods
-1.21.2	1.21.2 Fabric	fabric	0.19.2	java21	testing	fabric	Anchor for 1.21.2 Fabric mods
 1.21.1	1.21.1 Fabric	fabric	0.19.2	java21	testing	fabric	Supports mods that pin Java 21 exactly; bundled controller support
 1.21.1	1.21.1 NeoForge	neoforge	21.1.233	java21	experimental	neoforge	Playable experimental NeoForge target with bundled controller support
-1.21	1.21 Fabric	fabric	0.19.2	java21	testing	fabric	Anchor for 1.21
-1.20.6	1.20.6 Fabric	fabric	0.19.2	java21	testing	fabric	Anchor for 1.20.6
-1.20.5	1.20.5 Fabric	fabric	0.19.2	java21	testing	fabric	Anchor for 1.20.5
 1.20.4	1.20.4 Fabric	fabric	0.19.2	java21	testing	fabric	Uses Java 21 for mods that reject newer JVM majors; bundled controller support
 1.20.4	1.20.4 NeoForge	neoforge	20.4.237	java17	experimental	none	1.20.4 modpack anchor; requires Java 17 runtime
-1.20.3	1.20.3 Fabric	fabric	0.19.2	java21	testing	fabric	Anchor for 1.20.3
-1.20.2	1.20.2 Fabric	fabric	0.19.2	java21	testing	fabric	Anchor for 1.20.2
 1.20.1	1.20.1 Fabric	fabric	0.19.2	java21	testing	fabric	Bundled Bandit controller layer; Java 21 runtime
 1.20.1	1.20.1 Forge	forge	47.4.20	java21	experimental	forge	Forge provider implemented with bundled controller mod; first-launch validation pending
-1.20	1.20 Fabric	fabric	0.19.2	java21	testing	fabric	Anchor for 1.20
-1.19.4	1.19.4 Fabric	fabric	0.19.2	java21	testing	fabric	Anchor for 1.19.4
-1.19.3	1.19.3 Fabric	fabric	0.19.2	java21	testing	fabric	Anchor for 1.19.3
 1.19.2	1.19.2 Fabric	fabric	0.14.25	java21	testing	fabric	Java 21 runtime for legacy Fabric/Sodium mixin compatibility
 1.18.2	1.18.2 Forge	forge	40.2.27	java17	experimental	none	Forge anchor; provider + Java 17 Phase 3
 1.16.5	1.16.5 Fabric	fabric	0.14.25	java21	testing	fabric	Legacy GL path under validation

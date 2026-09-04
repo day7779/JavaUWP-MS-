@@ -15,65 +15,6 @@
 
 #include "third_party/miniz/miniz.h"
 
-static bool ExtractZipEntryToFile(const std::wstring& zipPath, const char* entryName, const std::wstring& outputPath) {
-    std::vector<unsigned char> zipBytes;
-    if (!ReadBinaryFileLimited(zipPath, zipBytes, 256ull * 1024ull * 1024ull)) {
-        WriteLogF(L"Could not read zip for extraction: %s", zipPath.c_str());
-        return false;
-    }
-
-    mz_zip_archive zip{};
-    if (!mz_zip_reader_init_mem(&zip, zipBytes.data(), zipBytes.size(), 0)) {
-        WriteLogF(L"Could not open zip for extraction: %s", zipPath.c_str());
-        return false;
-    }
-
-    const int idx = mz_zip_reader_locate_file(&zip, entryName, nullptr, 0);
-    if (idx < 0) {
-        mz_zip_reader_end(&zip);
-        WriteLogF(L"Zip entry not found: %s in %s", a2w(entryName).c_str(), zipPath.c_str());
-        return false;
-    }
-
-    size_t outSize = 0;
-    void* p = mz_zip_reader_extract_to_heap(&zip, static_cast<mz_uint>(idx), &outSize, 0);
-    mz_zip_reader_end(&zip);
-    if (!p) {
-        WriteLogF(L"Could not extract zip entry: %s", a2w(entryName).c_str());
-        return false;
-    }
-
-    const bool ok = WriteAllBytes(outputPath, p, outSize);
-    mz_free(p);
-    if (!ok) {
-        WriteLogF(L"Could not write extracted zip entry: %s", outputPath.c_str());
-    }
-    return ok;
-}
-
-static bool FileExistsNonEmpty(const std::wstring& path) {
-    WIN32_FILE_ATTRIBUTE_DATA data = {};
-    if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &data)) return false;
-    if (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) return false;
-    return data.nFileSizeHigh != 0 || data.nFileSizeLow != 0;
-}
-
-static bool EndsWithAscii(const char* text, const char* suffix) {
-    const size_t textLen = strlen(text);
-    const size_t suffixLen = strlen(suffix);
-    return textLen >= suffixLen && strcmp(text + textLen - suffixLen, suffix) == 0;
-}
-
-static bool ZipIsValid(const std::wstring& zipPath) {
-    std::vector<unsigned char> zipBytes;
-    if (!ReadBinaryFileLimited(zipPath, zipBytes, 256ull * 1024ull * 1024ull)) return false;
-    mz_zip_archive zip{};
-    if (!mz_zip_reader_init_mem(&zip, zipBytes.data(), zipBytes.size(), 0)) return false;
-    const mz_uint count = mz_zip_reader_get_num_files(&zip);
-    mz_zip_reader_end(&zip);
-    return count > 0;
-}
-
 static bool ForgeSrgJarComplete(const std::wstring& zipPath) {
     if (!FileExistsNonEmpty(zipPath)) return false;
 

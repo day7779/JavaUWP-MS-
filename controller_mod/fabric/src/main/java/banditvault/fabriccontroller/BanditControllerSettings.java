@@ -254,7 +254,6 @@ public final class BanditControllerSettings {
     }
 
     private static boolean usesGameplayContext(ControllerAction action) {
-        // ponytail: Java/mod key mappings are gameplay-scoped; add per-context metadata if Fabric exposes it.
         switch (action) {
             case MENU_ACCEPT:
             case MENU_CANCEL:

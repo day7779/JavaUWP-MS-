@@ -6,6 +6,8 @@ It does not grant rights to redistribute Minecraft, Mojang assets, Fabric, LWJGL
 
 The Mesa UWP runtime DLLs in `mesa-runtime/` remain under their own upstream license terms.
 
+`docs/THIRD-PARTY.md` lists every third party component, its upstream, its version and its license.
+
 ## Repository license
 
 Original project code is covered by the custom license in `LICENSE`.

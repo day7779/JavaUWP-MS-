@@ -1,3 +1,12 @@
+/*
+ * Vendored from Fabric Loader (https://github.com/FabricMC/fabric-loader).
+ * Applied against Fabric Loader 0.19.2 and 0.14.25; the source release it was
+ * copied from is not recorded.
+ * Licensed under the Apache License, Version 2.0.
+ *
+ * Modified for Xbox UWP: avoids the ZipFS open route that calls toRealPath(),
+ * which fails inside the Dev Mode sandbox.
+ */
 package net.fabricmc.loader.impl.util;
 
 import java.io.IOException;

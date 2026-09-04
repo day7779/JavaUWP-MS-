@@ -7,7 +7,7 @@
   xmlns:build="http://schemas.microsoft.com/developer/appx/2015/build">
 
   <Identity Name="BanditVault.Launcher" Publisher="CN=BanditVault" Version="1.0.0.0" ProcessorArchitecture="x64"/>
-  <mp:PhoneIdentity PhoneProductId="a1b2c3d4-0000-0000-0000-000000000002" PhonePublisherId="00000000-0000-0000-0000-000000000000"/>
+  <mp:PhoneIdentity PhoneProductId="af61ef29-17c0-41c0-83d7-a81ffe91bd02" PhonePublisherId="00000000-0000-0000-0000-000000000000"/>
 
   <Properties>
     <DisplayName>Bandit Launcher</DisplayName>

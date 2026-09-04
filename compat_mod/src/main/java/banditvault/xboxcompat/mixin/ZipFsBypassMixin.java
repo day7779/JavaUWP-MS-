@@ -10,7 +10,7 @@ import org.spongepowered.asm.mixin.Overwrite;
 @Mixin(net.minecraft.class_10619.class)
 public abstract class ZipFsBypassMixin {
     /**
-     * @author Codex
+     * @author BanditVault
      * @reason ZipFileSystemProvider's URI path calls toRealPath(), which fails in Xbox Dev Mode.
      */
     @Overwrite

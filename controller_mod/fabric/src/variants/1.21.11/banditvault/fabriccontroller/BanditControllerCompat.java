@@ -210,10 +210,6 @@ public final class BanditControllerCompat {
         }
     }
 
-    public static void renderCursorOverlay(class_310 client) {
-        // 1.20.1 draws the on-screen cursor from Screen.render via DrawContext.
-    }
-
     public static void renderGameplayGuide(class_332 context) {
         class_310 client = class_310.method_1551();
         if (!active || context == null || client == null || client.field_1755 != null || client.field_1724 == null || client.field_1690.field_1842) return;

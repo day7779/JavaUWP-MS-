@@ -58,6 +58,7 @@ final class BanditNativeKeyboard {
     }
 
     static Snapshot snapshot() {
+        if (!available()) return new Snapshot("", 0, 0, 0);
         int length = JNI.callI(TEXT_LENGTH);
         String text;
         if (length <= 0) {

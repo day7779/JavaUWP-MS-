@@ -22,7 +22,7 @@ $target = Join-Path $work "mc"
 $installer = Join-Path $work "neoforge-$NeoForgeVersion-installer.jar"
 $url = "https://maven.neoforged.net/releases/net/neoforged/neoforge/$NeoForgeVersion/neoforge-$NeoForgeVersion-installer.jar"
 
-New-Item -ItemType Directory -Force -Path $target | Out-Null
+Ensure-Dir $target
 '{"profiles":{},"settings":{},"version":3}' | Set-Content (Join-Path $target "launcher_profiles.json") -Encoding ascii
 
 if (-not (Test-Path $installer)) {
@@ -46,7 +46,7 @@ foreach ($rel in @($srg, $extra, $patched)) {
     $src = Join-Path $lib $rel
     if (-not (Test-Path $src)) { throw "installer did not produce $rel" }
     $dst = Join-Path $dstRoot $rel
-    New-Item -ItemType Directory -Force -Path (Split-Path $dst -Parent) | Out-Null
+    Ensure-Dir (Split-Path $dst -Parent)
     Copy-Item $src $dst -Force
     Write-Host ("staged {0}  ({1:N0} bytes)" -f $rel, (Get-Item $dst).Length)
 }
@@ -81,7 +81,7 @@ $toolClassPath = ($toolJars + @($toolClasses)) -join [IO.Path]::PathSeparator
 $toolSource = Join-Path $root "scripts\ApplyAccessTransformers.java"
 $javacExe = Join-Path (Split-Path (Split-Path $JavaExe -Parent) -Parent) "bin\javac.exe"
 if (-not (Test-Path $javacExe)) { throw "javac not found next to $JavaExe" }
-New-Item -ItemType Directory -Force -Path $toolClasses | Out-Null
+Ensure-Dir $toolClasses
 Write-Host "Compiling access transformer helper"
 & $javacExe -cp ($toolJars -join [IO.Path]::PathSeparator) -d $toolClasses $toolSource
 if ($LASTEXITCODE -ne 0) { throw "access transformer helper compile failed ($LASTEXITCODE)" }

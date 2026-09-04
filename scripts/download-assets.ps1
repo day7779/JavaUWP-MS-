@@ -12,16 +12,16 @@ $root = Resolve-RepoRoot
 $version = if ($MinecraftVersion) { $MinecraftVersion } else { $ProjectConfig.MinecraftVersion }
 $assetsDir = Get-ConfigPath "AssetsDir"
 
-New-Item -ItemType Directory -Force -Path "$assetsDir\indexes" | Out-Null
-New-Item -ItemType Directory -Force -Path "$assetsDir\objects" | Out-Null
+Ensure-Dir "$assetsDir\indexes"
+Ensure-Dir "$assetsDir\objects"
 
 # Get version json to find asset index
-$manifest = Invoke-WebRequest -UseBasicParsing -Uri 'https://piston-meta.mojang.com/mc/game/version_manifest_v2.json' | ConvertFrom-Json
+$manifest = Get-MinecraftVersionManifest
 $v = $manifest.versions | Where-Object { $_.id -eq $version } | Select-Object -First 1
 if (-not $v) {
     throw "Minecraft version $version not found in manifest."
 }
-$vj = Invoke-WebRequest -UseBasicParsing -Uri $v.url | ConvertFrom-Json
+$vj = Get-CachedRemoteJson -Uri $v.url
 
 # Download asset index
 $assetIndexUrl = $vj.assetIndex.url
@@ -40,7 +40,7 @@ foreach ($obj in $objects) {
     $subdir = $hash.Substring(0, 2)
     $destDir = "$assetsDir\objects\$subdir"
     $dest = "$destDir\$hash"
-    New-Item -ItemType Directory -Force -Path $destDir | Out-Null
+    Ensure-Dir $destDir
     if (-not (Test-Path $dest)) {
         $url = "https://resources.download.minecraft.net/$subdir/$hash"
         Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $dest

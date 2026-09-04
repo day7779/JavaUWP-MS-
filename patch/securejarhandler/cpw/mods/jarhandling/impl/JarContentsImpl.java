@@ -1,3 +1,13 @@
+/*
+ * Vendored from securejarhandler 3.0.8
+ * (https://github.com/NeoForged/SecureJarHandler), the version NeoForge 21.1.233
+ * resolves. Forge 1.20.1 pulls 2.1.10 and is deliberately not patched with this,
+ * see forge.cpp PrepareClientArtifacts.
+ * Licensed under the GNU Lesser General Public License, version 3.
+ *
+ * Modified for Xbox UWP: package scanning tolerates the sandbox filesystem and
+ * falls back to the backing path when the union filesystem cannot walk a jar.
+ */
 package cpw.mods.jarhandling.impl;
 
 import cpw.mods.jarhandling.JarContents;

@@ -6,7 +6,7 @@
 #include <string>
 #include <vector>
 
-static bool CheckAndLogJavaException(JNIEnv* env, const wchar_t* stage) {
+bool CheckAndLogJavaException(JNIEnv* env, const wchar_t* stage) {
     if (!env->ExceptionCheck()) return false;
     WriteLogF(L"Java exception during %s", stage);
 

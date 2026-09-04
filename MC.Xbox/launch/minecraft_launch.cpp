@@ -1,4 +1,4 @@
-﻿#include "minecraft_launch.h"
+#include "minecraft_launch.h"
 
 #include "app_globals.h"
 #include "crash_report.h"
@@ -13,6 +13,7 @@
 #include "runtime_manager.h"
 
 #include <jni.h>
+#include <roapi.h>
 #include <io.h>
 #include <fcntl.h>
 #include <share.h>
@@ -63,6 +64,10 @@ static HANDLE g_logTailerThreads[8] = {};
 static int g_logTailerThreadCount = 0;
 static HANDLE g_redirectedStdoutHandle = INVALID_HANDLE_VALUE;
 static HANDLE g_redirectedStderrHandle = INVALID_HANDLE_VALUE;
+
+static const ULONGLONG kLogTailerFastWindowMs = 120000;
+static const DWORD kLogTailerFastPollMs = 250;
+static const DWORD kLogTailerIdlePollMs = 2000;
 
 struct LogTailerConfig {
     std::wstring path;
@@ -293,6 +298,8 @@ static DWORD WINAPI LogTailerThreadProc(LPVOID param) {
     LARGE_INTEGER offset = {};
     char buffer[4096];
     bool attached = false;
+    // 5 tailers at 250ms is 20 file opens a second against files the jvm is writing
+    ULONGLONG startedAt = GetTickCount64();
 
     while (InterlockedCompareExchange(&g_logTailerRunning, 1, 1) == 1) {
         HANDLE file = CreateFile2(
@@ -327,7 +334,8 @@ static DWORD WINAPI LogTailerThreadProc(LPVOID param) {
             CloseHandle(file);
         }
 
-        Sleep(250);
+        const bool stillStarting = (GetTickCount64() - startedAt) < kLogTailerFastWindowMs;
+        Sleep(stillStarting ? kLogTailerFastPollMs : kLogTailerIdlePollMs);
     }
 
     return 0;
@@ -644,82 +652,10 @@ static bool PreloadJvm(
     if (!*jvmModule) {
         return false;
     }
-	
+
 	loadPackaged(packagedPrefix + L"\\bin\\java.dll", L"java.dll");
 
     WriteLogF(L"JVM DLLs loaded from package runtime %s", packagedPrefix.c_str());
-    return true;
-}
-
-static bool CheckAndLogJavaException(JNIEnv* env, const wchar_t* stage) {
-    if (!env->ExceptionCheck()) return false;
-    WriteLogF(L"Java exception during %s", stage);
-
-    jthrowable throwable = env->ExceptionOccurred();
-    env->ExceptionClear();
-
-    if (!throwable) {
-        WriteLog(L"Java exception object was null after ExceptionOccurred");
-        return true;
-    }
-
-    jclass stringWriterClass = env->FindClass("java/io/StringWriter");
-    jclass printWriterClass = env->FindClass("java/io/PrintWriter");
-    jclass throwableClass = env->FindClass("java/lang/Throwable");
-    if (!stringWriterClass || !printWriterClass || !throwableClass) {
-        WriteLog(L"Unable to load Java exception formatting classes");
-        env->ExceptionClear();
-        env->DeleteLocalRef(throwable);
-        return true;
-    }
-
-    jmethodID stringWriterCtor = env->GetMethodID(stringWriterClass, "<init>", "()V");
-    jmethodID printWriterCtor = env->GetMethodID(printWriterClass, "<init>", "(Ljava/io/Writer;)V");
-    jmethodID printStackTrace = env->GetMethodID(throwableClass, "printStackTrace", "(Ljava/io/PrintWriter;)V");
-    jmethodID toString = env->GetMethodID(stringWriterClass, "toString", "()Ljava/lang/String;");
-    if (!stringWriterCtor || !printWriterCtor || !printStackTrace || !toString || env->ExceptionCheck()) {
-        WriteLog(L"Unable to resolve Java exception formatting methods");
-        env->ExceptionClear();
-        env->DeleteLocalRef(throwable);
-        env->DeleteLocalRef(stringWriterClass);
-        env->DeleteLocalRef(printWriterClass);
-        env->DeleteLocalRef(throwableClass);
-        return true;
-    }
-
-    jobject stringWriter = env->NewObject(stringWriterClass, stringWriterCtor);
-    jobject printWriter = stringWriter ? env->NewObject(printWriterClass, printWriterCtor, stringWriter) : nullptr;
-    if (!stringWriter || !printWriter || env->ExceptionCheck()) {
-        WriteLog(L"Unable to create Java exception formatter");
-        env->ExceptionClear();
-        env->DeleteLocalRef(throwable);
-        env->DeleteLocalRef(stringWriterClass);
-        env->DeleteLocalRef(printWriterClass);
-        env->DeleteLocalRef(throwableClass);
-        return true;
-    }
-
-    env->CallVoidMethod(throwable, printStackTrace, printWriter);
-    jstring trace = static_cast<jstring>(env->CallObjectMethod(stringWriter, toString));
-    if (trace && !env->ExceptionCheck()) {
-        const char* utf8 = env->GetStringUTFChars(trace, nullptr);
-        if (utf8) {
-            const std::wstring wideTrace = a2w(utf8);
-            WriteLogF(L"Java exception stack:\n%s", wideTrace.c_str());
-            env->ReleaseStringUTFChars(trace, utf8);
-        }
-    } else {
-        WriteLog(L"Unable to stringify Java exception stack");
-        env->ExceptionClear();
-    }
-
-    if (trace) env->DeleteLocalRef(trace);
-    env->DeleteLocalRef(printWriter);
-    env->DeleteLocalRef(stringWriter);
-    env->DeleteLocalRef(throwable);
-    env->DeleteLocalRef(stringWriterClass);
-    env->DeleteLocalRef(printWriterClass);
-    env->DeleteLocalRef(throwableClass);
     return true;
 }
 
@@ -1104,11 +1040,24 @@ bool RunEmbeddedMinecraft(const std::wstring& exeDir,
     const bool neoForgeStartedWithGameClassPath = loaderSetup.neoForgeStartedWithGameClassPath;
 
     std::vector<std::string> vmOptionStorage;
-    vmOptionStorage.reserve(16);
+    vmOptionStorage.reserve(64);
+    // 5120 MB app budget on series s dev mode, so a 3G heap that never resizes fits
     vmOptionStorage.push_back("-Xmx3G");
-    vmOptionStorage.push_back("-Xms512M");
+    vmOptionStorage.push_back("-Xms3G");
     vmOptionStorage.push_back("-XX:MaxDirectMemorySize=512M");
-    WriteLog(L"JVM memory defaults: -Xmx3G -Xms512M -XX:MaxDirectMemorySize=512M");
+
+    // ignoreUnrecognized is JNI_FALSE, so a typo in jvm_args.txt would stop it booting
+    vmOptionStorage.push_back("-XX:+IgnoreUnrecognizedVMOptions");
+    vmOptionStorage.push_back("-XX:+UnlockExperimentalVMOptions");
+    vmOptionStorage.push_back("-XX:+UseG1GC");
+    // the 200ms default target lets young gen reach 2.2G before collecting
+    vmOptionStorage.push_back("-XX:MaxGCPauseMillis=50");
+    vmOptionStorage.push_back("-XX:G1NewSizePercent=20");
+    vmOptionStorage.push_back("-XX:G1ReservePercent=20");
+    vmOptionStorage.push_back("-XX:G1HeapRegionSize=32M");
+    // hsperfdata is mmapped and rewritten every collection, on console storage that is a frame hitch
+    vmOptionStorage.push_back("-XX:+PerfDisableSharedMem");
+    WriteLog(L"JVM heap: -Xmx3G -Xms3G -XX:MaxDirectMemorySize=512M, G1 at 50ms pause target");
     vmOptionStorage.push_back("--enable-native-access=ALL-UNNAMED");
     vmOptionStorage.push_back("--add-opens=jdk.zipfs/jdk.nio.zipfs=ALL-UNNAMED");
     const std::wstring selectedJavaBasePatchName =
@@ -1215,6 +1164,81 @@ bool RunEmbeddedMinecraft(const std::wstring& exeDir,
     vmOptionStorage.push_back("-Dlog4j.configurationFile=" + w2a(FileUriFromPath(logConfigPath)));
     vmOptionStorage.push_back("-XX:ErrorFile=" + w2a(fwd(gameDir + L"\\hs_err_pid%p.log")));
 
+    // appended last on purpose, hotspot takes the last occurrence so this overrides the built ins
+    const std::wstring jvmArgsPath = exeDir + L"\\jvm_args.txt";
+    if (GetFileAttributesW(jvmArgsPath.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        // resolved here because the template has no way to know where LocalState landed
+        const std::wstring gcLogPath = fwd(launcherLogDir) + L"/gc.log";
+        const std::wstring tpl =
+            L"# Bandit Launcher JVM options\n"
+            L"# One option per line. Lines starting with # are ignored.\n"
+            L"#\n"
+            L"# These are appended after the launcher's own options, so anything set here\n"
+            L"# overrides the built in value. The built ins are:\n"
+            L"#   -Xmx3G -Xms3G -XX:MaxDirectMemorySize=512M\n"
+            L"#   -XX:+UseG1GC -XX:+PerfDisableSharedMem\n"
+            L"#   -XX:MaxGCPauseMillis=50 -XX:G1NewSizePercent=20\n"
+            L"#   -XX:G1ReservePercent=20 -XX:G1HeapRegionSize=32M\n"
+            L"#\n"
+            L"# Unrecognised options are ignored rather than failing the launch, so a typo\n"
+            L"# here will not stop the game starting. Check mc_launch.log for lines reading\n"
+            L"# \"jvm_args.txt applying:\" to confirm what was actually picked up.\n"
+            L"\n"
+            L"# Write a garbage collection log next to the other logs.\n"
+            L"#-Xlog:gc:file=" + gcLogPath + L":time,uptime\n"
+            L"\n"
+            L"# The 50ms pause target is now a built in, measured on box: it took the worst\n"
+            L"# young collection from 154ms down to 62ms. Lower it further if stalls are still\n"
+            L"# visible, at the cost of collecting more often.\n"
+            L"#-XX:MaxGCPauseMillis=20\n"
+            L"\n"
+            L"# More aggressive alternative, derived from server side flag sets. Only worth\n"
+            L"# trying if the built ins are not enough and you want to push further.\n"
+            L"#-XX:G1NewSizePercent=30\n"
+            L"#-XX:G1MaxNewSizePercent=40\n"
+            L"#-XX:G1HeapRegionSize=8M\n"
+            L"#-XX:MaxGCPauseMillis=37\n"
+            L"#-XX:+ParallelRefProcEnabled\n"
+            L"#-XX:+DisableExplicitGC\n"
+            L"\n"
+            L"# Cap concurrent marking to one thread if half second mark cycles are stealing\n"
+            L"# cores from the render thread. 8 cores here, minus render, server and glthread.\n"
+            L"#-XX:ConcGCThreads=1\n"
+            L"\n"
+            L"# Cap the background worker pools if chunk loading starves the render thread.\n"
+            L"#-Dmax.bg.threads=3\n"
+            L"#-XX:ActiveProcessorCount=4\n";
+        if (WriteTextFile(jvmArgsPath, tpl)) {
+            WriteLogF(L"jvm_args.txt seeded at %s", jvmArgsPath.c_str());
+        } else {
+            WriteLogF(L"jvm_args.txt could not be seeded at %s", jvmArgsPath.c_str());
+        }
+    }
+
+    std::wstring jvmArgsText;
+    if (ReadTextFile(jvmArgsPath, jvmArgsText)) {
+        int applied = 0;
+        size_t pos = 0;
+        while (pos < jvmArgsText.size()) {
+            size_t end = jvmArgsText.find(L'\n', pos);
+            if (end == std::wstring::npos) end = jvmArgsText.size();
+            const std::wstring arg = TrimWhitespace(jvmArgsText.substr(pos, end - pos));
+            pos = end + 1;
+
+            if (arg.empty() || arg[0] == L'#') continue;
+            if (arg[0] != L'-') {
+                WriteLogF(L"jvm_args.txt ignoring line, not an option: %s", arg.c_str());
+                continue;
+            }
+            vmOptionStorage.push_back(w2a(arg));
+            WriteLogF(L"jvm_args.txt applying: %s", arg.c_str());
+            ++applied;
+        }
+        WriteLogF(L"jvm_args.txt applied %d option(s) from %s", applied, jvmArgsPath.c_str());
+    } else {
+        WriteLogF(L"jvm_args.txt not present at %s, using built in options only", jvmArgsPath.c_str());
+    }
+
     std::vector<std::string> appArgs = {
         "--username", authConfig.username,
         "--version", w2a(launchVersion),
@@ -1282,6 +1306,14 @@ bool RunEmbeddedMinecraft(const std::wstring& exeDir,
     if (createResult != JNI_OK || !vm || !env) {
         return false;
     }
+    {
+        // App.cpp reads this before the heap exists, so that one says nothing about headroom
+        unsigned long long limitMb = 0;
+        unsigned long long usedMb = 0;
+        if (ReadAppMemoryBudget(limitMb, usedMb)) {
+            WriteLogF(L"app memory after jvm create: %llu of %llu MB", usedMb, limitMb);
+        }
+    }
     reportProgress(
         L"Starting Java runtime",
         L"Java is online. Preparing loader startup next.",
@@ -1346,17 +1378,34 @@ bool RunEmbeddedMinecraft(const std::wstring& exeDir,
         L"gameDir=" + gameDir + L"\n" +
         L"nativesDir=" + nativesDir + L"\n");
     std::atomic<bool> javaMainRunning{ true };
-    std::thread javaMainWatchdog([&javaMainRunning, vm, effectiveMainClass]() {
+    // getAllStackTraces is a safepoint, every dump stalls the render thread
+    const bool alwaysDumpThreads = !GetEnvVarString(L"BANDIT_JAVA_THREAD_DUMPS").empty();
+    std::thread javaMainWatchdog([&javaMainRunning, vm, effectiveMainClass, alwaysDumpThreads]() {
+        // MemoryManager is a winrt static, without an apartment here every read throws
+        const HRESULT roHr = RoInitialize(RO_INIT_MULTITHREADED);
         unsigned seconds = 0;
         while (javaMainRunning.load()) {
             std::this_thread::sleep_for(std::chrono::seconds(5));
             seconds += 5;
             if (javaMainRunning.load()) {
-                WriteLogF(L"%s.main still running after %u seconds", effectiveMainClass.c_str(), seconds);
-                if (seconds == 15 || (seconds >= 30 && (seconds % 30) == 0)) {
+                unsigned long long limitMb = 0;
+                unsigned long long usedMb = 0;
+                if (ReadAppMemoryBudget(limitMb, usedMb)) {
+                    WriteLogF(L"%s.main still running after %u seconds, app memory %llu of %llu MB",
+                        effectiveMainClass.c_str(), seconds, usedMb, limitMb);
+                } else {
+                    WriteLogF(L"%s.main still running after %u seconds", effectiveMainClass.c_str(), seconds);
+                }
+                const bool dumpDue = alwaysDumpThreads
+                    ? (seconds == 15 || (seconds >= 30 && (seconds % 30) == 0))
+                    : (seconds == 15 || seconds == 45);
+                if (dumpDue) {
                     DumpJavaThreadStacks(vm, (effectiveMainClass + L".main watchdog").c_str());
                 }
             }
+        }
+        if (SUCCEEDED(roHr)) {
+            RoUninitialize();
         }
     });
 

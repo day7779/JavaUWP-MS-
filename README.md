@@ -72,6 +72,7 @@ minecraft version + loader + loader version
 
 | Target | State | Notes |
 | --- | --- | --- |
+| `26.2 + Fabric 0.19.3` | Experimental | First calendar versioned target. Unobfuscated client with no Fabric intermediary, LWJGL 3.4.1, and the Java 25 runtime. |
 | `1.21.11 + Fabric 0.19.2` | Supported | Current default target with bundled controller support. Base game has been tested. |
 | `1.21.1 + Fabric 0.19.2` | Testing | Base game, bundled controller support, and Cobblemon have been verified. Uses Java 21 for mods that require it. |
 | `1.21.1 + NeoForge 21.1.233` | Experimental | Base game, Sodium, JEI, and Modrinth modpack installs have been tested. Includes the bundled controller bridge and uses Java 21. |
@@ -259,18 +260,17 @@ Creator content must:
 
 Detailed build, patching, architecture, compatible mods, FAQs and legal notes live in `docs/`.
 
-- [Building](docs/BUILDING.md) — requirements, cache setup, packaging, nightly workflow.
-- [Architecture](docs/ARCHITECTURE.md) — UWP host layout, launch flow, and loader modules.
-- [Patching notes](docs/PATCHING.md) — why Fabric, GLFW, and sandbox patches exist.
-- [Legal notes](docs/LEGAL.md) — licensing, redistribution, and nightly package rules.
-- [Contributing](CONTRIBUTING.md) — auth policy and contribution expectations.
+- [Building](docs/BUILDING.md): requirements, cache setup, packaging, nightly workflow.
+- [Architecture](docs/ARCHITECTURE.md): UWP host layout, launch flow, and loader modules.
+- [Patching notes](docs/PATCHING.md): why Fabric, GLFW, and sandbox patches exist.
+- [Legal notes](docs/LEGAL.md): licensing, redistribution, and nightly package rules.
+- [Contributing](CONTRIBUTING.md): auth policy and contribution expectations.
 - [FAQ](docs/FAQ.md) - Contains answers to frequent questions asked by many users.
 
 Quick local build from the repo root:
 
 ```powershell
-.\scripts\download-libs.ps1
-java -jar .\staging\cache\tools\fabric-installer.jar client -dir .\staging\cache\gameDir -mcversion 1.21.11 -loader 0.19.2 -launcher win32 -noprofile
+.\scripts\setup.ps1
 .\build.ps1
 ```
 

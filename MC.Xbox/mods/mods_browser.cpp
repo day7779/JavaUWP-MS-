@@ -1,4 +1,4 @@
-﻿#include "mods_browser.h"
+#include "mods_browser.h"
 
 #include "modpack_io.h"
 #include "auth_screen.h"
@@ -53,6 +53,7 @@ static std::atomic<bool> g_modsSearchCapturing{false};
 static std::atomic<bool> g_modsEditFocusRemoved{false};
 static std::atomic<bool> g_modsSearchSubmit{false};
 
+// GetNamedValue throws on a type mismatch, so each of these returns its default
 static std::wstring JsonStringOrEmpty(const winrt::Windows::Data::Json::JsonObject& obj, const wchar_t* key) {
     using namespace winrt::Windows::Data::Json;
     if (!key || !obj.HasKey(key)) return {};
@@ -95,23 +96,6 @@ static bool JsonBoolOrFalse(const winrt::Windows::Data::Json::JsonObject& obj, c
 
 static std::wstring ModIconCachePath(const std::wstring& runtimeRoot, const std::wstring& projectId) {
     return runtimeRoot + L"\\mod-icons\\" + SafeFileName(projectId) + L".img";
-}
-
-static std::wstring CacheModIcon(const std::wstring& runtimeRoot, const std::wstring& projectId, const std::wstring& iconUrl) {
-    if (runtimeRoot.empty() || projectId.empty() || iconUrl.empty()) return {};
-    const std::wstring path = ModIconCachePath(runtimeRoot, projectId);
-    if (GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES) {
-        return path;
-    }
-
-    WriteLogF(L"Downloading Modrinth icon project=%s", projectId.c_str());
-    if (DownloadUrlToFile(iconUrl, path, nullptr)) {
-        return path;
-    }
-
-    DeleteFileW(path.c_str());
-    WriteLogF(L"Modrinth icon download failed project=%s url=%s", projectId.c_str(), iconUrl.c_str());
-    return {};
 }
 
 static std::wstring BuildModrinthSearchUrl(const char* index, int limit, int offset, const std::wstring& query, const char* projectType, const std::string& gameVersion, const std::string& loaderId) {
@@ -215,30 +199,6 @@ static void WriteModMeta(const std::wstring& runtimeRoot, const std::wstring& fi
         "desc\t" + w2a(StripNewlines(card.description)) + "\n" +
         "icon\t" + w2a(card.iconPath) + "\n";
     f.write(body.data(), static_cast<std::streamsize>(body.size()));
-}
-
-static bool ReadModMeta(const std::wstring& runtimeRoot, const std::wstring& fileName, ModCard& card) {
-    const std::wstring path = ModMetaPath(runtimeRoot, fileName);
-    std::ifstream f(path, std::ios::binary);
-    if (!f) return false;
-    std::string line;
-    bool any = false;
-    while (std::getline(f, line)) {
-        if (!line.empty() && line.back() == '\r') line.pop_back();
-        const size_t tab = line.find('\t');
-        if (tab == std::string::npos) continue;
-        const std::string key = line.substr(0, tab);
-        const std::wstring value = a2w(line.substr(tab + 1).c_str());
-        if (key == "title" && !value.empty()) { card.title = value; any = true; }
-        else if (key == "desc" && !value.empty()) { card.description = value; any = true; }
-        else if (key == "icon") {
-            if (!value.empty() && GetFileAttributesW(value.c_str()) != INVALID_FILE_ATTRIBUTES) {
-                card.iconPath = value;
-            }
-            any = true;
-        }
-    }
-    return any;
 }
 
 struct ProfileModInstallMeta {
@@ -377,83 +337,6 @@ static int RemoveProfileModAndUnusedDependencies(const std::wstring& runtimeRoot
     }
 
     return removed;
-}
-
-static bool ResolveInstalledModMeta(const std::wstring& runtimeRoot, const std::wstring& jarPath, ModCard& card) {
-    using namespace winrt::Windows::Data::Json;
-    std::string sha1;
-    if (!Sha1File(jarPath, &sha1) || sha1.empty()) return false;
-
-    const std::wstring versionUrl =
-        L"https://api.modrinth.com/v2/version_file/" + a2w(sha1.c_str()) + L"?algorithm=sha1";
-    const HttpResult versionResp = HttpGetString(versionUrl.c_str());
-    if (!versionResp.success()) return false;
-
-    std::wstring projectId;
-    try {
-        JsonObject version = JsonObject::Parse(winrt::to_hstring(versionResp.body));
-        projectId = JsonStringOrEmpty(version, L"project_id");
-    } catch (...) {
-        return false;
-    }
-    if (projectId.empty()) return false;
-
-    const std::wstring projectUrl =
-        L"https://api.modrinth.com/v2/project/" + a2w(FormUrlEncode(w2a(projectId)).c_str());
-    const HttpResult projectResp = HttpGetString(projectUrl.c_str());
-    if (!projectResp.success()) return false;
-
-    try {
-        JsonObject project = JsonObject::Parse(winrt::to_hstring(projectResp.body));
-        const std::wstring title = JsonStringOrEmpty(project, L"title");
-        const std::wstring desc = JsonStringOrEmpty(project, L"description");
-        const std::wstring iconUrl = JsonStringOrEmpty(project, L"icon_url");
-        if (!title.empty()) card.title = title;
-        if (!desc.empty()) card.description = desc;
-        card.projectId = projectId;
-        card.iconPath = CacheModIcon(runtimeRoot, projectId, iconUrl);
-    } catch (...) {
-        return false;
-    }
-    return true;
-}
-
-static bool LoadInstalledMods(const std::wstring& runtimeRoot, const std::wstring& userModsDir, std::vector<ModCard>& out) {
-    out.clear();
-    EnsureDirectoryTree(userModsDir);
-
-    WIN32_FIND_DATAW fd = {};
-    HANDLE h = FindFirstFileW((userModsDir + L"\\*.jar").c_str(), &fd);
-    if (h == INVALID_HANDLE_VALUE) {
-        return true;
-    }
-
-    do {
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
-        std::wstring name = fd.cFileName;
-        ModCard card;
-        card.title = name;
-        card.description = L"Installed in user-mods";
-        card.filePath = userModsDir + L"\\" + name;
-        card.status = L"Installed";
-        card.installed = true;
-
-        if (!ReadModMeta(runtimeRoot, name, card)) {
-            if (!ResolveInstalledModMeta(runtimeRoot, card.filePath, card)) {
-                card.title = name;
-                card.description = L"Installed in user-mods";
-            }
-            WriteModMeta(runtimeRoot, name, card);
-        }
-
-        out.push_back(card);
-    } while (FindNextFileW(h, &fd));
-    FindClose(h);
-
-    std::sort(out.begin(), out.end(), [](const ModCard& a, const ModCard& b) {
-        return _wcsicmp(a.title.c_str(), b.title.c_str()) < 0;
-    });
-    return true;
 }
 
 static const int kModPageSize = 50;
@@ -868,6 +751,10 @@ static bool InstallModrinthProjectRecursive(
             unsigned long long fileSize = 0;
             if (!ExtractPrimaryModrinthFile(version, downloadUrl, filename, sha1, fileSize)) {
                 lastSkipReason = L"version without downloadable file";
+                continue;
+            }
+            if (sha1.empty()) {
+                lastSkipReason = L"version without a sha1 hash";
                 continue;
             }
             if (const BlockedMod* blocked = FindBlockedModFile(filename)) {
@@ -1435,6 +1322,21 @@ static int ModsTargetIndex(const AuthUiState& state) {
     return -1;
 }
 
+static void ScrollModsTargetIntoView(AuthUiState& state) {
+    const int total = static_cast<int>(state.modsTargets.size());
+    const int visible = (std::min)(total, kModsTargetRowsVisible);
+    if (total <= visible) {
+        state.modsTargetScroll = 0;
+        return;
+    }
+    int scroll = state.modsTargetScroll;
+    if (state.modsTargetSel < scroll) scroll = state.modsTargetSel;
+    if (state.modsTargetSel > scroll + visible - 1) scroll = state.modsTargetSel - visible + 1;
+    if (scroll > total - visible) scroll = total - visible;
+    if (scroll < 0) scroll = 0;
+    state.modsTargetScroll = scroll;
+}
+
 LaunchTarget CurrentModsTarget(const AuthUiState& state) {
     const int idx = ModsTargetIndex(state);
     if (idx >= 0 && idx < static_cast<int>(state.modsTargets.size())) return state.modsTargets[static_cast<size_t>(idx)];
@@ -1615,6 +1517,7 @@ static void RegisterCharacterFallback() {
             });
         g_modsCharRegistered = true;
     } catch (...) {
+        WriteLogF(L"Mods search: CharacterReceived fallback registration failed, typing will not work");
     }
 }
 
@@ -1725,6 +1628,7 @@ static void CreateModsEditContext() {
             g_modsKeyDownRegistered = true;
         }
 
+        // all of these throw once the view is gone, every one is best effort
         try { g_inputPane = winrt::Windows::UI::ViewManagement::InputPane::GetForCurrentView(); } catch (...) {}
         g_modsUsingEditContext = true;
     } catch (...) {
@@ -1740,6 +1644,7 @@ static void BeginModsSearchCapture(ICoreWindow* window) {
             winrt::copy_from_abi(w, window);
             g_modsCharWindow = w;
         } catch (...) {
+            WriteLogF(L"Mods search: could not adopt the CoreWindow, keyboard capture is unavailable");
         }
     }
     CreateModsEditContext();
@@ -1749,6 +1654,7 @@ static void BeginModsSearchCapture(ICoreWindow* window) {
 }
 
 static void EndModsSearchCapture() {
+    // teardown, every winrt call here throws once the view is gone
     g_modsSearchCapturing.store(false);
     if (g_modsUsingEditContext && g_editContext) {
         try { g_editContext.NotifyFocusLeave(); } catch (...) {}
@@ -1786,6 +1692,7 @@ static void EndModsSearchCapture() {
 }
 
 static void ModsSearchBeginInput() {
+    // same as the teardown above, these are advisory and throw when the pane is gone
     g_modsEditFocusRemoved.store(false);
     g_modsSearchSubmit.store(false);
     if (g_modsUsingEditContext && g_editContext) {
@@ -2394,8 +2301,10 @@ void ShowModsPage(
                 const int total = static_cast<int>(state.modsTargets.size());
                 if (upDown && !upWasDown) {
                     if (total > 0) state.modsTargetSel = (state.modsTargetSel - 1 + total) % total;
+                    ScrollModsTargetIntoView(state);
                 } else if (downDown && !downWasDown) {
                     if (total > 0) state.modsTargetSel = (state.modsTargetSel + 1) % total;
+                    ScrollModsTargetIntoView(state);
                 } else if (backDown && !backWasDown) {
                     state.modsTargetOpen = false;
                 } else if ((selectDown && !selectWasDown) || (enterDown && !enterWasDown) || clickActivate) {
@@ -2406,6 +2315,7 @@ void ShowModsPage(
                 if ((selectDown && !selectWasDown) || (enterDown && !enterWasDown) || clickActivate) {
                     EnsureModsTargetState(state, runtimeRoot);
                     state.modsTargetSel = (std::max)(0, ModsTargetIndex(state));
+                    ScrollModsTargetIntoView(state);
                     state.modsTargetOpen = true;
                 } else if ((leftDown && !leftWasDown) || (upDown && !upWasDown)) {
                     state.modsFocus = 0;

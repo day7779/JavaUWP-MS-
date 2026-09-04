@@ -10,7 +10,7 @@ import org.spongepowered.asm.mixin.Overwrite;
 @Mixin(class_4239.class)
 public abstract class PathUtilBypassMixin {
     /**
-     * @author Codex
+     * @author BanditVault
      * @reason Xbox Dev Mode's packaged filesystem rejects Path.toRealPath()
      * on writable sandbox paths like game/saves/.../region and game/debug.
      * Minecraft only needs the directory to exist here, so bypass the

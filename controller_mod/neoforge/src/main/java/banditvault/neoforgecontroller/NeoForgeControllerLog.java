@@ -1,53 +1,18 @@
 package banditvault.neoforgecontroller;
 
-import java.io.IOException;
-import java.io.OutputStream;
-import java.io.PrintWriter;
-import java.io.StringWriter;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.OpenOption;
-import java.nio.file.Path;
-import java.nio.file.Paths;
-import java.nio.file.StandardOpenOption;
-import java.time.LocalTime;
+import banditvault.controllercore.ControllerLog;
 
 public final class NeoForgeControllerLog {
-    private static final Path LOG_PATH = Paths.get(System.getProperty("user.dir", "."), "xbox_compat.log");
-    private static final OpenOption[] OPEN_OPTIONS = new OpenOption[] {
-        StandardOpenOption.CREATE,
-        StandardOpenOption.WRITE,
-        StandardOpenOption.APPEND
-    };
+    private static final String TAG = "neoforge_controller";
 
     private NeoForgeControllerLog() {
     }
 
-    public static synchronized void log(String message) {
-        String line = "[" + LocalTime.now() + "] [neoforge_controller] " + message + System.lineSeparator();
-        try (OutputStream out = Files.newOutputStream(LOG_PATH, OPEN_OPTIONS)) {
-            out.write(line.getBytes(StandardCharsets.UTF_8));
-        } catch (IOException e) {
-            System.err.println("Bandit NeoForge controller log write failed: " + e.getMessage());
-        }
+    public static void log(String message) {
+        ControllerLog.log(TAG, message);
     }
 
     public static void logException(String message, Throwable throwable) {
-        StringWriter buffer = new StringWriter();
-        try (PrintWriter writer = new PrintWriter(buffer)) {
-            writer.println(message);
-            if (throwable != null) {
-                throwable.printStackTrace(writer);
-            }
-        }
-        log(trimTrailing(buffer.toString()));
-    }
-
-    private static String trimTrailing(String value) {
-        int end = value.length();
-        while (end > 0 && Character.isWhitespace(value.charAt(end - 1))) {
-            end--;
-        }
-        return value.substring(0, end);
+        ControllerLog.logException(TAG, message, throwable);
     }
 }

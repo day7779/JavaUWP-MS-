@@ -15,6 +15,8 @@
 #include <wrl/wrappers/corewrappers.h>
 #include <windows.foundation.h>
 #include <windows.storage.h>
+#include <winrt/base.h>
+#include <winrt/Windows.System.h>
 
 #include "third_party/miniz/miniz.h"
 
@@ -103,12 +105,15 @@ void WriteLog(const wchar_t* msg) {
     }
     if (g_logDir.empty()) return;
 
-    EnsureDirectoryTree(g_logDir);
-
     wchar_t path[MAX_PATH];
     swprintf_s(path, L"%s\\mc_launch.log", g_logDir.c_str());
     FILE* f = nullptr;
     _wfopen_s(&f, path, L"a");
+    if (!f) {
+        // directory check only on failure, it was costing a syscall per log line
+        EnsureDirectoryTree(g_logDir);
+        _wfopen_s(&f, path, L"a");
+    }
     if (f) {
         SYSTEMTIME st;
         GetLocalTime(&st);
@@ -298,6 +303,20 @@ std::wstring ToLowerW(std::wstring value) {
 std::string ToLowerAscii(std::string value) {
     std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) { return static_cast<char>(tolower(c)); });
     return value;
+}
+
+bool ReadAppMemoryBudget(unsigned long long& limitMb, unsigned long long& usedMb) {
+    try {
+        using winrt::Windows::System::MemoryManager;
+        limitMb = MemoryManager::AppMemoryUsageLimit() / (1024ull * 1024ull);
+        usedMb = MemoryManager::AppMemoryUsage() / (1024ull * 1024ull);
+        return true;
+    } catch (...) {
+        // throws on a thread that never called RoInitialize
+        limitMb = 0;
+        usedMb = 0;
+        return false;
+    }
 }
 
 bool WriteAllBytes(const std::wstring& path, const void* data, size_t size) {

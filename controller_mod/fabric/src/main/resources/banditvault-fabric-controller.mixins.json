@@ -2,7 +2,7 @@
   "required": true,
   "minVersion": "0.8",
   "package": "banditvault.fabriccontroller.mixin",
-  "compatibilityLevel": "JAVA_21",
+  "compatibilityLevel": "__COMPAT_LEVEL__",
   "client": [
     "BanditControllerClientMixin",
     "BanditControllerGameRendererMixin",

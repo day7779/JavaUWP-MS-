@@ -44,7 +44,7 @@ if (-not (Test-Path $srgClient) -or -not (Test-Path $patchedClient)) {
 }
 
 $dependencyDir = Join-Path (Get-ConfigPath "StagingDir") "cache\neoforge\$NeoForgeVersion"
-New-Item -ItemType Directory -Force -Path $dependencyDir | Out-Null
+Ensure-Dir $dependencyDir
 $universalJar = Join-Path $dependencyDir "neoforge-$NeoForgeVersion-universal.jar"
 if (-not (Test-Path $universalJar)) {
     $universalUrl = "https://maven.neoforged.net/releases/net/neoforged/neoforge/$NeoForgeVersion/neoforge-$NeoForgeVersion-universal.jar"
@@ -75,7 +75,7 @@ $libraryJars = @(Get-ChildItem -LiteralPath (Join-Path $gameDir "libraries") -Re
     Select-Object -ExpandProperty FullName)
 
 Remove-Item -Recurse -Force $buildRoot -ErrorAction SilentlyContinue
-New-Item -ItemType Directory -Force -Path $classesDir, $compileOnlyDir | Out-Null
+Ensure-Dir $classesDir, $compileOnlyDir
 
 $compileOnlySources = @(Get-ChildItem $compileJava -Recurse -Filter "*.java")
 $mainSources = @(Get-ChildItem $srcJava -Recurse -Filter "*.java")
@@ -137,7 +137,7 @@ if ($listing | Where-Object { $_ -like "net/neoforged/*" }) {
 }
 
 if ($OutputDir) {
-    New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
+    Ensure-Dir $OutputDir
     Copy-Item $jarPath (Join-Path $OutputDir $jarName) -Force
 }
 Write-Host "NeoForge controller mod built ($MinecraftVersion / $NeoForgeVersion) -> $jarPath"

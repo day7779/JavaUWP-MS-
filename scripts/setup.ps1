@@ -3,8 +3,6 @@ param(
     [string]$FabricLoaderVersion,
     [string]$AssetIndex
 )
-
-# Prepare the ignored build cache needed by build.ps1 on a clean CI runner.
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 
@@ -36,13 +34,13 @@ function Get-SafeFileName {
 }
 
 function Get-MinecraftVersionJson {
-    $manifest = Invoke-WebRequest -UseBasicParsing -Uri "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json" | ConvertFrom-Json
+    $manifest = Get-MinecraftVersionManifest
     $entry = $manifest.versions | Where-Object { $_.id -eq $version } | Select-Object -First 1
     if (-not $entry) {
         throw "Minecraft version $version not found in Mojang manifest."
     }
 
-    return Invoke-WebRequest -UseBasicParsing -Uri $entry.url | ConvertFrom-Json
+    return Get-CachedRemoteJson -Uri $entry.url
 }
 
 function Save-RemoteFile {
@@ -55,7 +53,7 @@ function Save-RemoteFile {
         return
     }
 
-    New-Item -ItemType Directory -Force -Path (Split-Path $Path -Parent) | Out-Null
+    Ensure-Dir (Split-Path $Path -Parent)
     Invoke-WebRequest -UseBasicParsing -Uri $Uri -OutFile $Path
 }
 
@@ -154,6 +152,11 @@ function Compare-MavenVersion {
             continue
         }
 
+        # a qualifier ranks below a number at the same index, so 1.0-alpha loses to 1.0
+        if ($lIsNum -ne $rIsNum) {
+            return $(if ($lIsNum) { 1 } else { -1 })
+        }
+
         $cmp = [string]::Compare($l, $r, [StringComparison]::OrdinalIgnoreCase)
         if ($cmp -ne 0) {
             return $cmp
@@ -170,9 +173,7 @@ function Add-LibraryJar {
         [Parameter(Mandatory = $true)][string]$RelativePath
     )
 
-    # 26.x lists each platform's natives as its own library entry sharing the base artifact's
-    # maven key, and natives-linux sorts before the real jar, so it would win the dedupe and
-    # take lwjgl's classes off the classpath
+    # natives-linux shares lwjgl's maven key and sorts first, so it would win the dedupe
     if ($RelativePath -match '-natives-[A-Za-z0-9_.-]+\.jar$') {
         return
     }
@@ -206,7 +207,7 @@ function Add-LibraryJar {
     }
 }
 
-New-Item -ItemType Directory -Force -Path $gameDir, $assetsDir, $nativesDir, $toolsDir, $notesDir | Out-Null
+Ensure-Dir $gameDir, $assetsDir, $nativesDir, $toolsDir, $notesDir
 
 Write-Host "=== Downloading Minecraft libraries ==="
 & (Join-Path $root "scripts\download-libs.ps1") -MinecraftVersion $version
@@ -291,7 +292,7 @@ if ($LASTEXITCODE -ne 0) {
 
 Write-Host "=== Downloading asset index ==="
 $indexDir = Join-Path $assetsDir "indexes"
-New-Item -ItemType Directory -Force -Path $indexDir | Out-Null
+Ensure-Dir $indexDir
 $assetIndexId = $versionJson.assetIndex.id
 $assetIndexPath = Join-Path $indexDir "$assetIndexId.json"
 Save-RemoteFile -Uri $versionJson.assetIndex.url -Path $assetIndexPath
@@ -349,8 +350,8 @@ if (-not (Test-Path $remappedJar)) {
     $remapStdoutLog = Join-Path $notesDir "fabric-remap.stdout.log"
     $remapStderrLog = Join-Path $notesDir "fabric-remap.stderr.log"
     $emptyModsDir = Join-Path $gameDir ".fabric\empty-mods-$version-$loaderVersion"
-    New-Item -ItemType Directory -Force -Path $emptyModsDir | Out-Null
-    New-Item -ItemType Directory -Force -Path (Join-Path $gameDir "logs") | Out-Null
+    Ensure-Dir $emptyModsDir
+    Ensure-Dir (Join-Path $gameDir "logs")
 
     $javaArgs = @(
         "-Dfabric.gameJarPath=$clientJar",
@@ -370,8 +371,7 @@ if (-not (Test-Path $remappedJar)) {
         "--versionType", "release"
     )
 
-    # fabric.modsFolder does not exist before loader 0.15, so old loaders still read gameDir\mods
-    # and try to resolve the default target's mods against the wrong game version
+    # fabric.modsFolder does not exist before loader 0.15, older ones read gameDir\mods
     $modsDir = Join-Path $gameDir "mods"
     $stashedModsDir = Join-Path $gameDir ".fabric\mods-stashed-$version-$loaderVersion"
     $modsStashed = $false
