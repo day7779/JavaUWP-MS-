@@ -20,7 +20,7 @@ Notable changes to Bandit Launcher. Nightly packages are numbered by build revis
 
 ### Fixed
 
-**Nine Minecraft versions could not launch at all.** Every Fabric target from 1.21.2 through 1.21.10 failed on startup with a duplicate ASM error, before a single mod loaded. Minecraft declares a copy of ASM on those versions, Fabric Loader declares a different one, and the launcher put both on the classpath. Only 1.21.11 and 26.2 were unaffected, which is why it went unnoticed. Those targets now start.
+**1.21.4 could not launch at all.** It failed on startup with a duplicate ASM error, before a single mod loaded. Minecraft declares its own copy of ASM on 1.21.2 through 1.21.10, Fabric Loader declares a different one, and the launcher put both on the classpath. 1.21.4 was the only version in that range the launcher offered, so it was the only one anyone could run into. It now starts. The fix covers the whole range, for whenever the other versions are added.
 
 **The version catalogue no longer lists targets with no controller support.** Sixteen entries were removed. They downloaded their full runtime during a build and had no controller variant behind them. Each will return as it gains real support.
 
