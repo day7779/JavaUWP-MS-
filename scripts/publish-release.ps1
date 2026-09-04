@@ -51,8 +51,16 @@ function Invoke-Gh {
         return 0
     }
 
-    & gh @GhArgs
-    return $LASTEXITCODE
+    # gh prints the release url on success, and anything on the success stream becomes the return value.
+    # it also writes progress to stderr, which Stop turns into a terminating NativeCommandError
+    $old = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        & gh @GhArgs | Out-Host
+        return $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $old
+    }
 }
 
 try {
