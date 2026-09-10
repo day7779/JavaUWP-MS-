@@ -27,7 +27,7 @@ The legacy Forge 1.20.1 target needs `build\forge-installer.jar` placed by hand.
 
 ## Versions
 
-Default versions live in `scripts/config.ps1`. The multi target catalog lives in `config\versions.tsv`.
+Default versions live in `scripts/config.ps1`. The multi target catalog lives in `config\versions.tsv`. Recommended Modrinth project slugs live in `config\recommended-mods.json`, keyed by loader and Minecraft version. Every catalog target needs an entry, including an empty array when there are no recommendations yet.
 
 Current defaults:
 
@@ -201,6 +201,7 @@ runtime\libraries\...\fabric-loader-<version>.jar
 securejarhandler-uwp-patch.jar
 runtime\bundled-mods\
 runtime\version_catalog.tsv
+runtime\recommended-mods.json
 runtime\manifests\
 runtime\version-mods\
 runtime\log_configs\

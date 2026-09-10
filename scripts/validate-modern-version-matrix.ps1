@@ -8,9 +8,9 @@ $ErrorActionPreference = "Stop"
 
 $root = Resolve-RepoRoot
 if (!$CatalogPath) { $CatalogPath = Join-Path $root "config\versions.tsv" }
+$catalogTargets = @(Import-Csv $CatalogPath -Delimiter "`t")
 $targets = @(
-    Import-Csv $CatalogPath -Delimiter "`t" |
-        Where-Object { Test-MinecraftVersionAtLeast -Version $_.minecraftVersion -Minimum "1.21" }
+    $catalogTargets | Where-Object { Test-MinecraftVersionAtLeast -Version $_.minecraftVersion -Minimum "1.21" }
 )
 $failures = New-Object System.Collections.Generic.List[string]
 
@@ -18,6 +18,61 @@ function Require-File([string]$Path, [string]$Label) {
     if (!(Test-Path -LiteralPath $Path -PathType Leaf)) {
         $failures.Add("$Label missing at $Path")
     }
+}
+
+$recommendationsPath = Join-Path $root "config\recommended-mods.json"
+$packagedRecommendationsPath = Join-Path (Get-ConfigPath "PackageContentDir") "runtime\recommended-mods.json"
+Require-File $recommendationsPath "recommended mods config"
+Require-File $packagedRecommendationsPath "packaged recommended mods config"
+
+$recommendations = $null
+if (Test-Path -LiteralPath $recommendationsPath -PathType Leaf) {
+    try {
+        $recommendations = Get-Content -Raw -LiteralPath $recommendationsPath | ConvertFrom-Json
+    } catch {
+        $failures.Add("recommended mods config is not valid JSON")
+    }
+}
+
+if ($recommendations) {
+    foreach ($target in $catalogTargets) {
+        $loader = $target.loader.ToLowerInvariant()
+        $version = $target.minecraftVersion
+        $loaderEntry = $recommendations.PSObject.Properties[$loader]
+        if (!$loaderEntry) {
+            $failures.Add("recommended mods config is missing loader $loader")
+            continue
+        }
+
+        $versionEntry = $loaderEntry.Value.PSObject.Properties[$version]
+        if (!$versionEntry) {
+            $failures.Add("recommended mods config is missing $version $loader")
+            continue
+        }
+
+        if ($versionEntry.Value -isnot [System.Array]) {
+            $failures.Add("recommended mods entry for $version $loader must be an array")
+            continue
+        }
+
+        $seen = @{}
+        foreach ($slug in @($versionEntry.Value)) {
+            if ($slug -isnot [string] -or [string]::IsNullOrWhiteSpace($slug)) {
+                $failures.Add("recommended mods entry for $version $loader contains an invalid slug")
+                continue
+            }
+            if ($seen.ContainsKey($slug)) {
+                $failures.Add("recommended mods entry for $version $loader contains duplicate slug $slug")
+            }
+            $seen[$slug] = $true
+        }
+    }
+}
+
+if ((Test-Path -LiteralPath $recommendationsPath -PathType Leaf) -and
+    (Test-Path -LiteralPath $packagedRecommendationsPath -PathType Leaf) -and
+    (Get-FileHash -LiteralPath $recommendationsPath).Hash -ne (Get-FileHash -LiteralPath $packagedRecommendationsPath).Hash) {
+    $failures.Add("packaged recommended mods config does not match config\recommended-mods.json")
 }
 
 foreach ($target in $targets) {

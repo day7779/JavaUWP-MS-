@@ -52,7 +52,7 @@ MC.Xbox/
 | `ui/launcher_ui` | Main menu rendering and interaction. |
 | `ui/auth_screen` | Sign in screen and QR/device code presentation. |
 | `ui/launcher_mouse` | Loads `mouse_support.dll` and drives the relay cursor in launcher menus and the mod browser. |
-| `mods/mods_browser` | Modrinth search, version resolution, install into active profile. |
+| `mods/mods_browser` | Modrinth search, recommended list loading, version resolution, install into active profile. |
 | `mods/mod_defaults` | Launcher seeded mod compatibility defaults per target. |
 | `profiles/profiles` | Profile CRUD, per profile game dirs, selected launch target. |
 | `net/http_client` | Shared HTTP helpers for downloads and APIs. |
@@ -195,6 +195,7 @@ Changing the default target requires updating `scripts/config.ps1` and usually `
 | Change main menu or auth UI | `ui/launcher_ui.cpp`, `ui/auth_screen` |
 | Change downloads or repair behavior | `launch/runtime_manager.cpp` |
 | Change Modrinth install behavior | `mods/mods_browser.cpp` |
+| Change recommended mods | `config/recommended-mods.json` |
 | Change remote uploads | `net/remote_file_server.cpp` |
 | Change relay mouse behavior | `mouse_support/`, `glfw_shim/glfw_uwp.cpp`, `ui/launcher_mouse.cpp`, `net/web_relay_server.cpp` |
 

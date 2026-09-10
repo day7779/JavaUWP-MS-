@@ -402,6 +402,13 @@ if (-not (Test-Path $versionCatalogSource)) {
 Copy-Item $versionCatalogSource (Join-Path $pkg "runtime\version_catalog.tsv") -Force
 Write-Host "Version catalog: $versionCatalogSource"
 
+$recommendedModsSource = Join-Path $root "config\recommended-mods.json"
+if (-not (Test-Path $recommendedModsSource)) {
+    throw "Recommended mods file not found at $recommendedModsSource"
+}
+Copy-Item $recommendedModsSource (Join-Path $pkg "runtime\recommended-mods.json") -Force
+Write-Host "Recommended mods: $recommendedModsSource"
+
 # NeoForge client jars are derived from the Minecraft client. Keep them out of normal and
 # nightly builds; opt in only for private diagnostics while on-device generation is being fixed.
 $prebuiltLibs = Join-Path $root "prebuilt\neoforge\libraries"

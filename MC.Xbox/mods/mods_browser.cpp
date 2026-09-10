@@ -1163,51 +1163,55 @@ static void StartInstallJob(const ModCard& card, const std::wstring& runtimeRoot
     }).detach();
 }
 
-static std::vector<std::wstring> RecommendedSlugsForTarget(const LaunchTarget& target) {
-    const std::string version = w2a(target.minecraftVersion);
+static bool LoadRecommendedSlugsForTarget(
+    const LaunchTarget& target,
+    std::vector<std::wstring>& slugs,
+    std::wstring& error) {
+    using namespace winrt::Windows::Data::Json;
+
+    slugs.clear();
+    const std::wstring path = GetExecutableDir() + L"\\runtime\\recommended-mods.json";
+    std::wstring text;
+    if (!ReadTextFile(path, text)) {
+        error = L"Recommended mods file is missing";
+        WriteLogF(L"Recommended mods file missing: %s", path.c_str());
+        return false;
+    }
+
     std::wstring loader = target.loader;
     std::transform(loader.begin(), loader.end(), loader.begin(),
         [](wchar_t c) { return static_cast<wchar_t>(towlower(c)); });
-    if (loader == L"neoforge") {
-        if (CompareVersionNumbers(version, "1.21.1") >= 0) {
-            return {
-                L"sodium",
-                L"jei"
-            };
+
+    try {
+        const JsonObject root = JsonObject::Parse(winrt::hstring(text));
+        const winrt::hstring loaderKey(loader);
+        const winrt::hstring versionKey(target.minecraftVersion);
+        if (!root.HasKey(loaderKey) || root.GetNamedValue(loaderKey).ValueType() != JsonValueType::Object) {
+            error = L"No recommendations configured for " + target.loader;
+            return false;
         }
-        return {};
-    }
 
-    if (loader != L"fabric") {
-        return {};
-    }
+        const JsonObject versions = root.GetNamedObject(loaderKey);
+        if (!versions.HasKey(versionKey) || versions.GetNamedValue(versionKey).ValueType() != JsonValueType::Array) {
+            error = L"No recommendations configured for " + target.minecraftVersion + L" " + target.loader;
+            return false;
+        }
 
-    if (CompareVersionNumbers(version, "1.20.1") >= 0) {
-        std::vector<std::wstring> slugs = {
-            L"sodium",
-            L"modernfix",
-            L"ferrite-core",
-            L"c2me-fabric",
-            L"scalablelux",
-            L"asyncparticles",
-            L"mcwifipnp",
-            L"fpsdisplay",
-            L"modmenu"
-        };
-        return slugs;
+        const JsonArray configured = versions.GetNamedArray(versionKey);
+        for (uint32_t i = 0; i < configured.Size(); ++i) {
+            const IJsonValue value = configured.GetAt(i);
+            if (value.ValueType() != JsonValueType::String || value.GetString().empty()) {
+                error = L"Invalid recommended mod entry for " + target.minecraftVersion + L" " + target.loader;
+                return false;
+            }
+            slugs.emplace_back(value.GetString().c_str());
+        }
+        return true;
+    } catch (...) {
+        error = L"Could not parse recommended mods file";
+        WriteLogF(L"Recommended mods file parse failed: %s", path.c_str());
+        return false;
     }
-
-    return {
-        L"sodium",
-        L"modernfix",
-        L"ferrite-core",
-        L"lithium",
-        L"starlight",
-        L"krypton",
-        L"lambdynamiclights",
-        L"fpsdisplay",
-        L"modmenu"
-    };
 }
 
 static bool ModrinthProjectHasTargetVersion(const std::wstring& projectIdOrSlug, const std::string& gameVersion, const std::string& loaderId) {
@@ -1242,7 +1246,10 @@ static bool FetchRecommendedMods(const std::wstring& runtimeRoot, const LaunchTa
     using namespace winrt::Windows::Data::Json;
     error.clear();
 
-    const std::vector<std::wstring> recommendedSlugs = RecommendedSlugsForTarget(target);
+    std::vector<std::wstring> recommendedSlugs;
+    if (!LoadRecommendedSlugsForTarget(target, recommendedSlugs, error)) {
+        return false;
+    }
     if (recommendedSlugs.empty()) {
         return true;
     }
