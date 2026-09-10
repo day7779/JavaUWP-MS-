@@ -462,9 +462,9 @@ public final class BanditControllerCompat {
         }
         if (scrollCooldown == 0) {
             double scroll = 0.0;
-            if (ry < -0.35f || button(GLFW.GLFW_GAMEPAD_BUTTON_DPAD_UP)) {
+            if (ry < -0.35f || (cursorMode == CursorMode.FREE && button(GLFW.GLFW_GAMEPAD_BUTTON_DPAD_UP))) {
                 scroll = settings.scrollAmount;
-            } else if (ry > 0.35f || button(GLFW.GLFW_GAMEPAD_BUTTON_DPAD_DOWN)) {
+            } else if (ry > 0.35f || (cursorMode == CursorMode.FREE && button(GLFW.GLFW_GAMEPAD_BUTTON_DPAD_DOWN))) {
                 scroll = -settings.scrollAmount;
             }
             if (scroll != 0.0) {

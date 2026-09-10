@@ -12,10 +12,10 @@ public final class ControllerBindings {
             case ATTACK: return ControllerInput.RIGHT_TRIGGER;
             case USE: return ControllerInput.LEFT_TRIGGER;
             case JUMP: return ControllerInput.A;
-            case SNEAK: return ControllerInput.B;
+            case SNEAK: return ControllerInput.RIGHT_THUMB;
             case SPRINT: return ControllerInput.LEFT_THUMB;
             case INVENTORY: return ControllerInput.Y;
-            case DROP: return ControllerInput.DPAD_DOWN;
+            case DROP: return ControllerInput.B;
             case SWAP_HANDS: return ControllerInput.X;
             // bedrock has no pick block
             case PICK_BLOCK: return ControllerInput.UNBOUND;

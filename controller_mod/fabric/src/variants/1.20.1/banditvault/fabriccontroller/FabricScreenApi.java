@@ -21,6 +21,15 @@ final class FabricScreenApi {
         RenderSystem.enableDepthTest();
     }
 
+    static void beginOverlay(class_332 context) {
+        context.method_51448().method_22903();
+        context.method_51448().method_22904(0.0, 0.0, 400.0);
+    }
+
+    static void endOverlay(class_332 context) {
+        context.method_51448().method_22909();
+    }
+
     static boolean mousePressed(class_437 screen, double mouseX, double mouseY, int button) {
         return screen.method_25402(mouseX, mouseY, button);
     }

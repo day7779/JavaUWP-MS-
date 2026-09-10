@@ -138,7 +138,7 @@ NeoForge generates patched client artifacts on first launch from downloaded offi
 
 ### Forge
 
-`launch/loaders/forge.cpp` implements the experimental `1.20.1 + Forge 47.4.20` provider. It follows the same loader hook pattern as NeoForge:
+`launch/loaders/forge.cpp` implements the experimental Forge provider. It follows the same loader hook pattern as NeoForge:
 
 - Reads Forge install metadata from the generated download manifest.
 - Prepares SRG client artifacts from downloaded official inputs (similar to NeoForge patched client generation).
@@ -147,7 +147,7 @@ NeoForge generates patched client artifacts on first launch from downloaded offi
 
 Forge patched client jars are generated locally during build or first launch prep from official inputs. Do not commit or redistribute generated Forge client jars.
 
-Other Forge catalog rows (for example `1.18.2`) may exist in `config/versions.tsv` before their providers are implemented.
+Modern Forge controller targets from 1.21 through 26.2 reuse the NeoForge shared source with a Forge entrypoint. Minecraft 1.21.2 has no Forge row because no matching loader was published. Older catalog rows may still exist before their controller providers are implemented.
 
 To add another Forge target:
 

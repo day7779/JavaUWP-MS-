@@ -1,6 +1,7 @@
 package banditvault.neoforgecontroller;
 
 import banditvault.controllercore.ControllerSettingsStore;
+import banditvault.controllercore.ControllerAction;
 
 import java.io.File;
 import java.io.FileInputStream;
@@ -59,5 +60,9 @@ public final class NeoForgeControllerSettings extends ControllerSettingsStore {
         } catch (IOException e) {
             NeoForgeControllerLog.logException("NeoForge controller settings failed to save", e);
         }
+    }
+
+    public static ControllerAction controllerActionForJavaKey(String keyId) {
+        return ControllerSettingsStore.controllerActionForJavaKey(keyId);
     }
 }

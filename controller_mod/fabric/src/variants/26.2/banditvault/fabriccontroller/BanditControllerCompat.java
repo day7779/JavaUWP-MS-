@@ -84,11 +84,11 @@ public final class BanditControllerCompat {
         if (!poll()) {
             releaseJavaKeyMappings();
             BanditControllerKeyboard.close();
-            if (client.gui.screen() instanceof BanditControllerRadialScreen) {
-                client.gui.setScreen(null);
+            if (FabricClientApi.screen(client) instanceof BanditControllerRadialScreen) {
+                FabricClientApi.setScreen(client, null);
             }
             if (active) {
-                releaseGameplayKeys(client, client.gui.screen() == null);
+                releaseGameplayKeys(client, FabricClientApi.screen(client) == null);
                 crouchToggled = false;
                 sprintToggled = false;
                 relayOwnsCursor = false;
@@ -106,12 +106,12 @@ public final class BanditControllerCompat {
         tickJavaKeyMappings(
             client,
             BanditControllerSettings.get(),
-            client.gui.screen() == null && client.player != null && client.isWindowActive());
+            FabricClientApi.screen(client) == null && client.player != null && client.isWindowActive());
 
-        if (client.gui.screen() != null) {
+        if (FabricClientApi.screen(client) != null) {
             lastLookNanos = 0L;
             releaseGameplayKeys(client, false);
-            tickScreen(client, client.gui.screen());
+            tickScreen(client, FabricClientApi.screen(client));
         } else {
             BanditControllerKeyboard.close();
             relayOwnsCursor = false;
@@ -122,7 +122,7 @@ public final class BanditControllerCompat {
     }
 
     public static void renderFrame(Minecraft client) {
-        if (client == null || client.gui.screen() != null || client.player == null || !poll()) {
+        if (client == null || FabricClientApi.screen(client) != null || client.player == null || !poll()) {
             lastLookNanos = 0L;
             return;
         }
@@ -152,7 +152,7 @@ public final class BanditControllerCompat {
         if (screen instanceof BanditControllerSettingsScreen || screen instanceof BanditControllerRadialScreen) {
             return;
         }
-        if (!active || screen == null || context == null || client == null || client.gui.screen() != screen) {
+        if (!active || screen == null || context == null || client == null || FabricClientApi.screen(client) != screen) {
             return;
         }
         if (!relayOwnsCursor) renderControllerGuide(screen, context, client);
@@ -195,7 +195,7 @@ public final class BanditControllerCompat {
         if (screen instanceof BanditControllerSettingsScreen || screen instanceof BanditControllerRadialScreen) {
             return;
         }
-        if (!active || screen == null || client == null || client.gui.screen() != screen) {
+        if (!active || screen == null || client == null || FabricClientApi.screen(client) != screen) {
             return;
         }
         observeRelayCursor(screen);
@@ -212,7 +212,7 @@ public final class BanditControllerCompat {
 
     public static void renderGameplayGuide(GuiGraphicsExtractor context) {
         Minecraft client = Minecraft.getInstance();
-        if (!active || context == null || client == null || client.gui.screen() != null || client.player == null || client.gui.hud.isHidden()) return;
+        if (!active || context == null || client == null || FabricClientApi.screen(client) != null || client.player == null || FabricClientApi.isHudHidden(client)) return;
         BanditControllerSettings settings = BanditControllerSettings.get();
         BlockHitResult blockHit = client.hitResult instanceof BlockHitResult
             && client.hitResult.getType() == HitResult.Type.BLOCK
@@ -242,7 +242,7 @@ public final class BanditControllerCompat {
 
     public static int screenMouseX(Screen screen, int fallback) {
         Minecraft client = Minecraft.getInstance();
-        if (!active || relayOwnsCursor || cursorX < 0.0 || client == null || client.gui.screen() != screen) {
+        if (!active || relayOwnsCursor || cursorX < 0.0 || client == null || FabricClientApi.screen(client) != screen) {
             return fallback;
         }
         return (int)Math.round(cursorX);
@@ -250,7 +250,7 @@ public final class BanditControllerCompat {
 
     public static int screenMouseY(Screen screen, int fallback) {
         Minecraft client = Minecraft.getInstance();
-        if (!active || relayOwnsCursor || cursorY < 0.0 || client == null || client.gui.screen() != screen) {
+        if (!active || relayOwnsCursor || cursorY < 0.0 || client == null || FabricClientApi.screen(client) != screen) {
             return fallback;
         }
         return (int)Math.round(cursorY);
@@ -258,7 +258,7 @@ public final class BanditControllerCompat {
 
     public static float[] analogMovement() {
         Minecraft client = Minecraft.getInstance();
-        if (client == null || client.gui.screen() != null || !poll()) {
+        if (client == null || FabricClientApi.screen(client) != null || !poll()) {
             return null;
         }
         return ControllerRuntime.shapedMovement(
@@ -285,7 +285,7 @@ public final class BanditControllerCompat {
     }
 
     private static void ensureMenuCursorMode(Minecraft client) {
-        if (client == null || client.gui.screen() == null || client.getWindow() == null) {
+        if (client == null || FabricClientApi.screen(client) == null || client.getWindow() == null) {
             return;
         }
         long window = client.getWindow().handle();
@@ -300,12 +300,12 @@ public final class BanditControllerCompat {
 
         if (pressed(settings, ControllerAction.RADIAL_MENU)) {
             releaseGameplayKeys(client, true);
-            client.gui.setScreen(new BanditControllerRadialScreen());
+            FabricClientApi.setScreen(client, new BanditControllerRadialScreen());
             return;
         }
 
         if (pressed(GLFW.GLFW_GAMEPAD_BUTTON_BACK)) {
-            client.gui.setScreen(new BanditControllerSettingsScreen(null));
+            FabricClientApi.setScreen(client, new BanditControllerSettingsScreen(null));
             return;
         }
 
@@ -368,7 +368,7 @@ public final class BanditControllerCompat {
         if (screen instanceof BanditControllerRadialScreen) {
             BanditControllerRadialScreen radial = (BanditControllerRadialScreen)screen;
             if (client.player == null || !client.isWindowActive()) {
-                client.gui.setScreen(null);
+                FabricClientApi.setScreen(client, null);
                 return;
             }
             radial.setSelectedSlot(ControllerRuntime.radialSlot(
@@ -376,12 +376,12 @@ public final class BanditControllerCompat {
                 axis(GLFW.GLFW_GAMEPAD_AXIS_RIGHT_Y),
                 settings.lookDeadzone));
             if (pressed(settings, ControllerAction.MENU_CANCEL)) {
-                client.gui.setScreen(null);
+                FabricClientApi.setScreen(client, null);
                 return;
             }
             if (released(settings, ControllerAction.RADIAL_MENU)) {
                 int slot = radial.selectedSlot();
-                client.gui.setScreen(null);
+                FabricClientApi.setScreen(client, null);
                 activateRadialSlot(slot);
             }
             return;
@@ -454,7 +454,7 @@ public final class BanditControllerCompat {
                     applySnapTarget(screen, MENU_NAVIGATION.discover(screen, cursorX, cursorY));
                 }
             } else if (!FabricScreenApi.keyPressed(screen, GLFW.GLFW_KEY_ESCAPE, 0, 0)) {
-                client.gui.setScreen(null);
+                FabricClientApi.setScreen(client, null);
             }
             return;
         }
@@ -463,7 +463,7 @@ public final class BanditControllerCompat {
             quickMoveFocusedSlot(screen);
         }
 
-        if (client.gui.screen() != screen) {
+        if (FabricClientApi.screen(client) != screen) {
             return;
         }
 
@@ -542,7 +542,7 @@ public final class BanditControllerCompat {
 
     static void resumeMenuAfterKeyboard(Screen screen) {
         Minecraft client = Minecraft.getInstance();
-        if (screen == null || client == null || client.gui.screen() != screen) return;
+        if (screen == null || client == null || FabricClientApi.screen(client) != screen) return;
         takeControllerCursor();
         snapStickLatched = false;
         ensureScreenCursor(screen);

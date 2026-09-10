@@ -11,14 +11,14 @@ description='''Xbox-native controller support for Bandit Launcher on NeoForge.''
 [[dependencies.banditvault_neoforge_controller]]
 modId="neoforge"
 type="required"
-versionRange="[21.1.233,21.2)"
+versionRange="[__NEOFORGE_VERSION__]"
 ordering="NONE"
 side="CLIENT"
 
 [[dependencies.banditvault_neoforge_controller]]
 modId="minecraft"
 type="required"
-versionRange="[1.21.1,1.21.2)"
+versionRange="[__MINECRAFT_VERSION__]"
 ordering="NONE"
 side="CLIENT"
 

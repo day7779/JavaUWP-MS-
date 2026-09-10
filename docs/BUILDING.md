@@ -23,7 +23,7 @@ Install these, then run one command. Everything else the build needs is download
 
 Mesa UWP runtime DLLs are already tracked in `mesa-runtime\`. Pass `-MesaRuntimeDir` if you want to build against a different one.
 
-Forge targets additionally need `build\forge-installer.jar` placed by hand. That is the only file the setup script cannot fetch for you, and it is only needed if you are building Forge.
+The legacy Forge 1.20.1 target needs `build\forge-installer.jar` placed by hand. Modern Forge targets download their matching official installer automatically.
 
 ## Versions
 
@@ -37,7 +37,15 @@ Current defaults:
 - Java release: `21`
 - JNA: `5.17.0`
 
-The default target is `1.21.11 + Fabric 0.19.2`, but the package also includes catalog entries and per target runtime manifests for the playable targets listed in `config\versions.tsv`, including the experimental `1.21.1 + NeoForge 21.1.233` target.
+The default target is `1.21.11 + Fabric 0.19.2`. The catalog includes every stable Minecraft version from 1.21 through 26.2 for Fabric and NeoForge. Forge is included for each of those versions except 1.21.2, where no Forge loader was published. These modern targets remain experimental until they have been tested on Xbox hardware.
+
+Build every modern controller and compatibility target with:
+
+```powershell
+.\scripts\validate-modern-version-matrix.ps1
+```
+
+This checks 47 loader targets and 16 Fabric compatibility builds.
 
 The main build accepts temporary overrides:
 
@@ -61,7 +69,7 @@ For adding another playable Fabric target, add it to `config\versions.tsv`, make
 
 For adding another playable NeoForge target, the launcher needs matching NeoForge install metadata in the generated manifest and launch provider logic in `MC.Xbox\launch\loaders\neoforge.cpp` (dispatched through `launch\loaders\loader.cpp`). NeoForge generates patched client artifacts on first launch from downloaded official inputs. Do not commit or redistribute generated NeoForge client jars.
 
-Forge `1.20.1 + 47.4.20` has an experimental launch provider in `launch\loaders\forge.cpp`. The build also packages a per target Forge controller mod from `controller_mod\forge\`.
+Forge has an experimental launch provider in `launch\loaders\forge.cpp`. Modern Forge targets from 1.21 through 26.2 use the shared modern controller source and thin version adapters under `controller_mod\neoforge\`. Forge 1.21.2 is not cataloged because no matching loader was published.
 
 Forge build inputs that belong in the repo:
 
@@ -69,13 +77,13 @@ Forge build inputs that belong in the repo:
 config\forge-install-profile.json
 ```
 
-Place the matching Forge installer locally (not committed) before building Forge patched clients or controller mods:
+Place the matching Forge installer locally before building the legacy 1.20.1 patched client or controller mod:
 
 ```text
 build\forge-installer.jar
 ```
 
-`scripts\prepare-forge-patched-client.ps1` uses those files to generate or refresh the patched Forge client jar in the local cache. See [PATCHING.md](PATCHING.md) for controller mod details.
+`scripts\prepare-forge-patched-client.ps1` downloads modern official installers and generates the matching patched client jar in the local cache. It keeps the existing local input path for legacy 1.20.1. See [PATCHING.md](PATCHING.md) for controller mod details.
 
 For adding another playable Forge target, add it to `config\versions.tsv`, extend `launch\loaders\forge.cpp`, and let `build.ps1` generate the manifest plus any `controller_mod` output under `runtime\version-mods\<target-id>\`.
 

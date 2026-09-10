@@ -25,7 +25,15 @@ $javaHome = Resolve-JavaHome
 $javac = Join-Path $javaHome "bin\javac.exe"
 $jar = Join-Path $javaHome "bin\jar.exe"
 
-if ($MinecraftVersion -ne "1.20.1" -or $ForgeVersion -ne "1.20.1-47.4.20") {
+if ($MinecraftVersion -ne "1.20.1") {
+    & (Join-Path $PSScriptRoot "build_forge_modern_controller_mod.ps1") `
+        -MinecraftVersion $MinecraftVersion `
+        -ForgeVersion $ForgeVersion `
+        -OutputDir $OutputDir
+    return
+}
+
+if ($ForgeVersion -ne "1.20.1-47.4.20") {
     throw "Forge controller mod sources currently support only Minecraft 1.20.1 / Forge 1.20.1-47.4.20."
 }
 

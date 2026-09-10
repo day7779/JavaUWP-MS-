@@ -602,15 +602,15 @@ if ($Loader -eq "neoforge") {
     } elseif ($mcpVersion) {
         $lines.Add("# forgeMcpVersion`t$mcpVersion")
     }
-    $installToolsVersion = Get-LibraryVersion $installProfile "net.minecraftforge.installertools:installertools:"
+    $installToolsVersion = Get-LibraryVersion $installProfile "net.minecraftforge:installertools:"
     if (-not $installToolsVersion) {
         $installToolsVersion = Get-LibraryVersion $installProfile "net.neoforged.installertools:installertools:"
     }
-    $jarSplitterVersion = Get-LibraryVersion $installProfile "net.minecraftforge.installertools:jarsplitter:"
+    $jarSplitterVersion = Get-LibraryVersion $installProfile "net.minecraftforge:jarsplitter:"
     if (-not $jarSplitterVersion) {
         $jarSplitterVersion = Get-LibraryVersion $installProfile "net.neoforged.installertools:jarsplitter:"
     }
-    $binaryPatcherVersion = Get-LibraryVersion $installProfile "net.minecraftforge.installertools:binarypatcher:"
+    $binaryPatcherVersion = Get-LibraryVersion $installProfile "net.minecraftforge:binarypatcher:"
     if (-not $binaryPatcherVersion) {
         $binaryPatcherVersion = Get-LibraryVersion $installProfile "net.neoforged.installertools:binarypatcher:"
     }

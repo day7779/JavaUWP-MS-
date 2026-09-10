@@ -2,6 +2,7 @@ package banditvault.fabriccontroller.mixin;
 
 import banditvault.fabriccontroller.BanditControllerCompat;
 import banditvault.fabriccontroller.BanditControllerSettingsScreen;
+import banditvault.fabriccontroller.FabricClientApi;
 import java.util.Collections;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.components.AbstractWidget;
@@ -20,7 +21,7 @@ public abstract class BanditControllerControlsScreenMixin {
     private void banditvault$addControllerSettingsButton(CallbackInfo ci) {
         Screen screen = (Screen) (Object) this;
         Button button = BanditControllerCompat.createButton(0, 0, 150, 20, "Bandit Controller...", ignored ->
-            Minecraft.getInstance().gui.setScreen(new BanditControllerSettingsScreen(screen)));
+            FabricClientApi.setScreen(Minecraft.getInstance(), new BanditControllerSettingsScreen(screen)));
         OptionsList list = ((BanditControllerOptionsSubScreenAccessor) this).banditvault$optionsList();
         list.addSmall(Collections.<AbstractWidget>singletonList(button));
     }

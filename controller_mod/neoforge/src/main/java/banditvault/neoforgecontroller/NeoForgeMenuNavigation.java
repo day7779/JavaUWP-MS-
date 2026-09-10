@@ -8,9 +8,12 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import net.minecraft.client.gui.ComponentPath;
 import net.minecraft.client.gui.components.AbstractWidget;
 import net.minecraft.client.gui.components.events.ContainerEventHandler;
 import net.minecraft.client.gui.components.events.GuiEventListener;
+import net.minecraft.client.gui.navigation.FocusNavigationEvent;
+import net.minecraft.client.gui.navigation.ScreenDirection;
 import net.minecraft.client.gui.navigation.ScreenRectangle;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.client.gui.screens.inventory.AbstractContainerScreen;
@@ -18,7 +21,6 @@ import net.minecraft.client.gui.screens.recipebook.OverlayRecipeComponent;
 import net.minecraft.client.gui.screens.recipebook.RecipeBookComponent;
 import net.minecraft.client.gui.screens.recipebook.RecipeUpdateListener;
 import net.minecraft.world.inventory.Slot;
-import org.lwjgl.glfw.GLFW;
 
 final class NeoForgeMenuNavigation {
     enum Region {
@@ -258,7 +260,7 @@ final class NeoForgeMenuNavigation {
 
     private Position moveNative(Screen currentScreen, GridNavigation.Direction direction, boolean allowSameTarget) {
         GuiEventListener before = deepestFocused(currentScreen);
-        currentScreen.keyPressed(key(direction), 0, 0);
+        applyNavigation(currentScreen, new FocusNavigationEvent.ArrowNavigation(nativeDirection(direction)), false);
         GuiEventListener focused = deepestFocused(currentScreen);
         Position position = focusedPosition(focused);
         if (position != null && (allowSameTarget || focused != before)) {
@@ -276,7 +278,7 @@ final class NeoForgeMenuNavigation {
     private Position discoverNative(Screen currentScreen, boolean logFailure) {
         Position focused = focusedPosition(deepestFocused(currentScreen));
         if (focused == null) {
-            currentScreen.keyPressed(GLFW.GLFW_KEY_TAB, 0, 0);
+            applyNavigation(currentScreen, new FocusNavigationEvent.TabNavigation(true), true);
             focused = focusedPosition(deepestFocused(currentScreen));
         }
         if (focused != null) {
@@ -402,9 +404,7 @@ final class NeoForgeMenuNavigation {
     }
 
     private static RecipeBookComponent recipeBook(Screen currentScreen) {
-        return currentScreen instanceof RecipeUpdateListener
-            ? ((RecipeUpdateListener) currentScreen).getRecipeBookComponent()
-            : null;
+        return NeoForgeVersionApi.recipeBook(currentScreen);
     }
 
     private static boolean isNarrow(Screen currentScreen) {
@@ -435,13 +435,25 @@ final class NeoForgeMenuNavigation {
         return new Position(rectangle.left() + rectangle.width() / 2.0, rectangle.top() + rectangle.height() / 2.0);
     }
 
-    private static int key(GridNavigation.Direction direction) {
+    private static ScreenDirection nativeDirection(GridNavigation.Direction direction) {
         switch (direction) {
-            case UP: return GLFW.GLFW_KEY_UP;
-            case DOWN: return GLFW.GLFW_KEY_DOWN;
-            case LEFT: return GLFW.GLFW_KEY_LEFT;
-            case RIGHT: return GLFW.GLFW_KEY_RIGHT;
-            default: return GLFW.GLFW_KEY_UNKNOWN;
+            case UP: return ScreenDirection.UP;
+            case DOWN: return ScreenDirection.DOWN;
+            case LEFT: return ScreenDirection.LEFT;
+            case RIGHT: return ScreenDirection.RIGHT;
+            default: throw new IllegalArgumentException("Unknown navigation direction " + direction);
+        }
+    }
+
+    private static void applyNavigation(Screen screen, FocusNavigationEvent navigation, boolean retryAfterClearingFocus) {
+        ComponentPath path = screen.nextFocusPath(navigation);
+        if (path == null && retryAfterClearingFocus) {
+            screen.clearFocus();
+            path = screen.nextFocusPath(navigation);
+        }
+        if (path != null) {
+            screen.clearFocus();
+            path.applyFocus(true);
         }
     }
 

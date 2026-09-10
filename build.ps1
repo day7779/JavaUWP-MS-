@@ -16,6 +16,20 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+$buildLockDirectory = Join-Path $PSScriptRoot ".local"
+New-Item -ItemType Directory -Path $buildLockDirectory -Force | Out-Null
+try {
+    $buildLock = [System.IO.File]::Open(
+        (Join-Path $buildLockDirectory "build.lock"),
+        [System.IO.FileMode]::OpenOrCreate,
+        [System.IO.FileAccess]::ReadWrite,
+        [System.IO.FileShare]::None)
+} catch [System.IO.IOException] {
+    throw "Another Bandit Launcher build is already using this checkout."
+}
+
+try {
+
 $script:BuildFailures = @()
 function Add-BuildFailure {
     param(
@@ -1156,4 +1170,7 @@ if ($script:BuildFailures.Count -gt 0) {
     if ($StrictTargets) {
         exit 1
     }
+}
+} finally {
+    $buildLock.Dispose()
 }
