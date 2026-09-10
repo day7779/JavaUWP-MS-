@@ -375,11 +375,6 @@ function Get-ForgeInstallerVersion([string]$MinecraftVersion, [string]$Version) 
     return "$MinecraftVersion-$Version"
 }
 
-function Get-LoaderInstallerCacheDir {
-    # under staging so CI can restore it, the system temp dir is empty on every runner
-    return Join-Path (Get-ConfigPath "CacheDir") "loader-installers"
-}
-
 function Get-LoaderProfile([string]$Loader, [string]$MinecraftVersion, [string]$LoaderVersion) {
     if ($Loader -eq "fabric") {
         return Get-Json "https://meta.fabricmc.net/v2/versions/loader/$MinecraftVersion/$LoaderVersion/profile/json"

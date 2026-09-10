@@ -17,9 +17,8 @@ if (-not (Test-Path $JavaExe)) {
 }
 
 $mcAndNeoForm = "$McVersion-$NeoFormVersion"
-$work = Join-Path $env:TEMP "nfgen-$NeoForgeVersion"
-$target = Join-Path $work "mc"
-$installer = Join-Path $work "neoforge-$NeoForgeVersion-installer.jar"
+$target = Get-LoaderInstallRoot "neoforge"
+$installer = Join-Path (Get-LoaderInstallerCacheDir) "neoforge-$NeoForgeVersion-installer.jar"
 $url = "https://maven.neoforged.net/releases/net/neoforged/neoforge/$NeoForgeVersion/neoforge-$NeoForgeVersion-installer.jar"
 
 Ensure-Dir $target
@@ -59,5 +58,4 @@ if (Test-Path $newPatchedPath) {
     }
 }
 
-Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
 Write-Host "done. prebuilt jars updated under prebuilt\neoforge\libraries"

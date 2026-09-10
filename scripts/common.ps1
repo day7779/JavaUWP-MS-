@@ -234,6 +234,20 @@ function Get-MinecraftVersionManifest {
     return Get-CachedRemoteJson -Uri "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json"
 }
 
+# one copy of every loader installer jar, shared by the manifest generator and the patched client scripts
+function Get-LoaderInstallerCacheDir {
+    $dir = Join-Path (Get-ConfigPath "CacheDir") "loader-installers"
+    Ensure-Dir $dir
+    return $dir
+}
+
+# every forge and neoforge target installs into one launcher-shaped tree so the vanilla libraries download once
+function Get-LoaderInstallRoot([string]$Loader) {
+    $dir = Join-Path (Get-ConfigPath "CacheDir") "$Loader\install"
+    Ensure-Dir $dir
+    return $dir
+}
+
 function New-BuildStamp {
     param(
         [string[]]$Values = @(),

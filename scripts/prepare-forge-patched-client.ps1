@@ -17,8 +17,8 @@ $javaExe = Join-Path $javaHome "bin\java.exe"
 if ($MinecraftVersion -ne "1.20.1") {
     $forgeCoordinate = if ($ForgeVersion.StartsWith("$MinecraftVersion-")) { $ForgeVersion } else { "$MinecraftVersion-$ForgeVersion" }
     $cacheRoot = Join-Path (Get-ConfigPath "StagingDir") "cache\forge\$forgeCoordinate"
-    $installRoot = Join-Path $cacheRoot "install"
-    $installerJar = Join-Path $cacheRoot "forge-$forgeCoordinate-installer.jar"
+    $installRoot = Get-LoaderInstallRoot "forge"
+    $installerJar = Join-Path (Get-LoaderInstallerCacheDir) "forge-$forgeCoordinate-installer.jar"
     $installedClient = Join-Path $installRoot "libraries\net\minecraftforge\forge\$forgeCoordinate\forge-$forgeCoordinate-client.jar"
     $stagedClient = Join-Path $root "prebuilt\forge\libraries\net\minecraftforge\forge\$forgeCoordinate\forge-$forgeCoordinate-client.jar"
     if ((Test-Path $stagedClient) -and (Get-Item $stagedClient).Length -gt 1MB) {

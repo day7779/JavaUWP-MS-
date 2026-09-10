@@ -96,6 +96,14 @@ jobs:
           restore-keys: |
             manifests-${{ runner.os }}-
 
+      - name: Restore patched loader clients
+        uses: actions/cache@v4
+        with:
+          path: prebuilt
+          key: prebuilt-${{ runner.os }}-${{ hashFiles('config/versions.tsv', 'scripts/prepare-forge-patched-client.ps1', 'scripts/gen-neoforge-artifacts.ps1') }}
+          restore-keys: |
+            prebuilt-${{ runner.os }}-
+
       - name: Prepare build cache
         shell: powershell
         run: .\scripts\setup.ps1
