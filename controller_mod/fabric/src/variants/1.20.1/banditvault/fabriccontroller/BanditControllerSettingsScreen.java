@@ -49,10 +49,9 @@ public final class BanditControllerSettingsScreen extends class_437 {
         drawFooter(context, layout, mouseX, mouseY);
         if (pickerOption != null) {
             // text batches until the end of the frame, so the picker has to win on z or the rows draw through it
-            context.method_51448().method_22903();
-            context.method_51448().method_22904(0.0, 0.0, 400.0);
+            FabricScreenApi.beginOverlay(context);
             drawPicker(context, mouseX, mouseY);
-            context.method_51448().method_22909();
+            FabricScreenApi.endOverlay(context);
         }
     }
 

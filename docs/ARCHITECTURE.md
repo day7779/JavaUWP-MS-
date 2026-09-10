@@ -52,7 +52,7 @@ MC.Xbox/
 | `ui/launcher_ui` | Main menu rendering and interaction. |
 | `ui/auth_screen` | Sign in screen and QR/device code presentation. |
 | `ui/launcher_mouse` | Loads `mouse_support.dll` and drives the relay cursor in launcher menus and the mod browser. |
-| `mods/mods_browser` | Modrinth search, version resolution, install into active profile. |
+| `mods/mods_browser` | Modrinth search, recommended list loading, version resolution, install into active profile. |
 | `mods/mod_defaults` | Launcher seeded mod compatibility defaults per target. |
 | `profiles/profiles` | Profile CRUD, per profile game dirs, selected launch target. |
 | `net/http_client` | Shared HTTP helpers for downloads and APIs. |
@@ -138,7 +138,7 @@ NeoForge generates patched client artifacts on first launch from downloaded offi
 
 ### Forge
 
-`launch/loaders/forge.cpp` implements the experimental `1.20.1 + Forge 47.4.20` provider. It follows the same loader hook pattern as NeoForge:
+`launch/loaders/forge.cpp` implements the experimental Forge provider. It follows the same loader hook pattern as NeoForge:
 
 - Reads Forge install metadata from the generated download manifest.
 - Prepares SRG client artifacts from downloaded official inputs (similar to NeoForge patched client generation).
@@ -147,7 +147,7 @@ NeoForge generates patched client artifacts on first launch from downloaded offi
 
 Forge patched client jars are generated locally during build or first launch prep from official inputs. Do not commit or redistribute generated Forge client jars.
 
-Other Forge catalog rows (for example `1.18.2`) may exist in `config/versions.tsv` before their providers are implemented.
+Modern Forge controller targets from 1.21 through 26.2 reuse the NeoForge shared source with a Forge entrypoint. Minecraft 1.21.2 has no Forge row because no matching loader was published. Older catalog rows may still exist before their controller providers are implemented.
 
 To add another Forge target:
 
@@ -195,6 +195,7 @@ Changing the default target requires updating `scripts/config.ps1` and usually `
 | Change main menu or auth UI | `ui/launcher_ui.cpp`, `ui/auth_screen` |
 | Change downloads or repair behavior | `launch/runtime_manager.cpp` |
 | Change Modrinth install behavior | `mods/mods_browser.cpp` |
+| Change recommended mods | `config/recommended-mods.json` |
 | Change remote uploads | `net/remote_file_server.cpp` |
 | Change relay mouse behavior | `mouse_support/`, `glfw_shim/glfw_uwp.cpp`, `ui/launcher_mouse.cpp`, `net/web_relay_server.cpp` |
 

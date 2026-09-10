@@ -152,7 +152,7 @@ public final class BanditControllerSettingsScreen extends Screen {
 
     public void close() {
         BanditControllerSettings.save();
-        Minecraft.getInstance().gui.setScreen(parent);
+        FabricClientApi.setScreen(Minecraft.getInstance(), parent);
     }
 
     public boolean isCapturingBinding() {

@@ -59,7 +59,8 @@ $sources = Get-ChildItem $srcJava -Recurse -Filter "*.java" | Select-Object -Exp
 
 # a version folder overlays same-named main sources and owns its own mixin list, which is how
 # unobfuscated targets opt out of the intermediary-keyed gating below
-$variantDir = Join-Path $PSScriptRoot "src\variants\$MinecraftVersion"
+$variantVersion = if ($MinecraftVersion -like "26.*") { "26.2" } else { $MinecraftVersion }
+$variantDir = Join-Path $PSScriptRoot "src\variants\$variantVersion"
 $variantMixinsJson = Join-Path $variantDir "resources\banditvault-xbox-compat.mixins.json"
 $hasVariant = Test-Path $variantDir
 

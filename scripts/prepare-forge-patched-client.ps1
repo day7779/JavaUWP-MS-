@@ -11,14 +11,48 @@ $ErrorActionPreference = "Stop"
 $root = Resolve-RepoRoot
 $gameDir = Get-ConfigPath "GameDir"
 $libraryDir = Join-Path $gameDir "libraries"
+$javaHome = Resolve-JavaHome
+$javaExe = Join-Path $javaHome "bin\java.exe"
+
+if ($MinecraftVersion -ne "1.20.1") {
+    $forgeCoordinate = if ($ForgeVersion.StartsWith("$MinecraftVersion-")) { $ForgeVersion } else { "$MinecraftVersion-$ForgeVersion" }
+    $cacheRoot = Join-Path (Get-ConfigPath "StagingDir") "cache\forge\$forgeCoordinate"
+    $installRoot = Join-Path $cacheRoot "install"
+    $installerJar = Join-Path $cacheRoot "forge-$forgeCoordinate-installer.jar"
+    $installedClient = Join-Path $installRoot "libraries\net\minecraftforge\forge\$forgeCoordinate\forge-$forgeCoordinate-client.jar"
+    $stagedClient = Join-Path $root "prebuilt\forge\libraries\net\minecraftforge\forge\$forgeCoordinate\forge-$forgeCoordinate-client.jar"
+    if ((Test-Path $stagedClient) -and (Get-Item $stagedClient).Length -gt 1MB) {
+        Write-Host "Using cached Forge patched client -> $stagedClient"
+        return $stagedClient
+    }
+
+    Ensure-Dir $cacheRoot, $installRoot
+    '{"profiles":{},"settings":{},"version":3}' | Set-Content (Join-Path $installRoot "launcher_profiles.json") -Encoding ascii
+    if (-not (Test-Path $installerJar)) {
+        $installerUrl = "https://maven.minecraftforge.net/net/minecraftforge/forge/$forgeCoordinate/forge-$forgeCoordinate-installer.jar"
+        Write-Host "Downloading $installerUrl"
+        Invoke-WebRequest -UseBasicParsing -Uri $installerUrl -OutFile $installerJar -TimeoutSec 180
+    }
+
+    $installerLog = Join-Path $cacheRoot "installer.log"
+    & $javaExe -jar $installerJar --installClient $installRoot *> $installerLog
+    if ($LASTEXITCODE -ne 0) {
+        Get-Content $installerLog -Tail 30
+        throw "Forge installer failed ($LASTEXITCODE)"
+    }
+    if (-not (Test-Path $installedClient)) { throw "Forge installer did not produce $installedClient" }
+    Ensure-Dir (Split-Path $stagedClient -Parent)
+    Copy-Item $installedClient $stagedClient -Force
+    Write-Host "Forge patched client ready -> $stagedClient"
+    return $stagedClient
+}
+
 $profilePath = Join-Path $root "config\forge-install-profile.json"
 if (-not (Test-Path $profilePath)) {
     throw "Forge install profile missing at $profilePath"
 }
 
 $profile = Get-Content -Raw -Path $profilePath | ConvertFrom-Json
-$javaHome = Resolve-JavaHome
-$javaExe = Join-Path $javaHome "bin\java.exe"
 $mcAndMcp = "$MinecraftVersion-$McpVersion"
 
 function Join-MavenPath {

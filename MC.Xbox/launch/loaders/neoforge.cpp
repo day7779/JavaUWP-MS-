@@ -341,6 +341,10 @@ static bool IsNeoForgePrepOrModuleJar(const std::wstring& entry) {
         L"/net/neoforged/autorenamingtool/",
         L"/net/neoforged/installertools/",
         L"-installer.jar",
+        // installertools dep, not a game library. iris jij's glsl-transformer which ships an
+        // unrelocated org.apache.commons.collections4.trie, so both become modules exporting the
+        // same package and the game layer fails to resolve
+        L"/org/apache/commons/commons-collections4/",
         // raw vanilla client (game/versions/<mc>/<mc>.jar) is only a prep input. NeoForge supplies
         // the patched srg client as the `minecraft` module via its production client provider, so the
         // vanilla jar on the class-path becomes a second module owning net.minecraft.* and the module

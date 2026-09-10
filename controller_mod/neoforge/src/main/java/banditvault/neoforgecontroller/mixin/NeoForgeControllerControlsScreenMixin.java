@@ -1,6 +1,7 @@
 package banditvault.neoforgecontroller.mixin;
 
 import banditvault.neoforgecontroller.NeoForgeControllerCompat;
+import banditvault.neoforgecontroller.NeoForgeClientApi;
 import java.util.Collections;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.components.AbstractWidget;
@@ -18,7 +19,7 @@ public abstract class NeoForgeControllerControlsScreenMixin {
     private void banditvault$addControllerSettingsButton(CallbackInfo ci) {
         Screen screen = (Screen) (Object) this;
         Button button = NeoForgeControllerCompat.createButton(0, 0, 150, 20, "Bandit Controller...", ignored ->
-            Minecraft.getInstance().setScreen(NeoForgeControllerCompat.createSettingsScreen(screen)));
+            NeoForgeClientApi.setScreen(Minecraft.getInstance(), NeoForgeControllerCompat.createSettingsScreen(screen)));
         ((NeoForgeControllerOptionsSubScreenAccessor) this).banditvault$optionsList()
             .addSmall(Collections.<AbstractWidget>singletonList(button));
     }

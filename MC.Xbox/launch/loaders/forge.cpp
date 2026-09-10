@@ -123,21 +123,125 @@ static bool ForgeClientArtifactsReady(
     const std::vector<std::wstring>& extraGameArgs) {
     const std::wstring forgeMavenVersion = ForgeMavenVersion(launchVersion);
     const std::wstring mcpVersion = ForgeMcpVersion(manifestMcpVersion, extraGameArgs);
-    if (forgeMavenVersion.empty() || mcpVersion.empty()) {
-        WriteLogF(L"Forge artifact readiness check missing metadata forge=%s mcp=%s",
-            forgeMavenVersion.c_str(), mcpVersion.c_str());
+    if (forgeMavenVersion.empty()) {
+        WriteLog(L"Forge artifact readiness check missing Forge version");
         return false;
     }
 
     const std::wstring libraryDir = runtimeRoot + L"\\game\\libraries";
+    const std::wstring patchedClient = libraryDir + L"\\" + MavenPath(L"net.minecraftforge", L"forge", forgeMavenVersion, L"client");
+    if (mcpVersion.empty()) {
+        return FileExistsNonEmpty(patchedClient) && ZipIsValid(patchedClient);
+    }
+
     const std::wstring mcAndMcp = minecraftVersion + L"-" + mcpVersion;
     const std::wstring mcExtra = libraryDir + L"\\" + MavenPath(L"net.minecraft", L"client", mcAndMcp, L"extra");
     const std::wstring mcSrg = libraryDir + L"\\" + MavenPath(L"net.minecraft", L"client", mcAndMcp, L"srg");
-    const std::wstring patchedClient = libraryDir + L"\\" + MavenPath(L"net.minecraftforge", L"forge", forgeMavenVersion, L"client");
     return ForgeSrgJarComplete(mcSrg) &&
         FileExistsNonEmpty(mcExtra) &&
         FileExistsNonEmpty(patchedClient) &&
         ZipIsValid(patchedClient);
+}
+
+static bool PrepareForgeOfficialClientArtifacts(
+    JNIEnv* env,
+    const std::wstring& runtimeRoot,
+    const std::wstring& clientJar,
+    const std::wstring& minecraftVersion,
+    const std::wstring& forgeMavenVersion,
+    const std::wstring& binaryPatcherVersion) {
+    const std::wstring libraryDir = runtimeRoot + L"\\game\\libraries";
+    const std::wstring patchedClient = libraryDir + L"\\" + MavenPath(L"net.minecraftforge", L"forge", forgeMavenVersion, L"client");
+    const std::wstring installerJar = libraryDir + L"\\" + MavenPath(L"net.minecraftforge", L"forge", forgeMavenVersion, L"installer");
+    const std::wstring binPatch = runtimeRoot + L"\\game\\forge\\" + forgeMavenVersion + L"\\client.lzma";
+
+    auto jarValid = [&](const std::wstring& jar) {
+        return FileExistsNonEmpty(jar) && ZipIsValid(jar);
+    };
+    if (jarValid(patchedClient)) {
+        WriteLogF(L"Forge client artifact already prepared for %s", forgeMavenVersion.c_str());
+        return true;
+    }
+
+    if (!FileExistsNonEmpty(binPatch)) {
+        if (!FileExistsNonEmpty(installerJar)) {
+            WriteLogF(L"Forge installer jar missing: %s", installerJar.c_str());
+            return false;
+        }
+        if (!ExtractZipEntryToFile(installerJar, "data/client.lzma", binPatch)) return false;
+    }
+
+    auto runInstallTools = [&](std::vector<std::string> args) {
+        return LaunchInvokeJavaMain(env, L"net.minecraftforge.installertools.ConsoleTool", args);
+    };
+    auto runArt = [&](std::vector<std::string> args) {
+        return LaunchInvokeJavaMain(env, L"net.minecraftforge.fart.Main", args);
+    };
+    auto runPatcher = [&](std::vector<std::string> args) {
+        return LaunchInvokeJavaMain(env, L"net.minecraftforge.binarypatcher.ConsoleTool", args);
+    };
+
+    std::wstring cleanInput = clientJar;
+    if (minecraftVersion.rfind(L"26.", 0) != 0) {
+        const std::wstring mojmaps = libraryDir + L"\\" + MavenPath(L"net.minecraft", L"client", minecraftVersion, L"mappings", L"tsrg");
+        const std::wstring officialClient = libraryDir + L"\\" + MavenPath(L"net.minecraft", L"client", minecraftVersion, L"official");
+        EnsureDirectoryTree(GetParentDir(mojmaps));
+        EnsureDirectoryTree(GetParentDir(officialClient));
+
+        if (!FileExistsNonEmpty(mojmaps) &&
+            !runInstallTools({ "--task", "DOWNLOAD_MOJMAPS", "--sanitize", "--version", w2a(minecraftVersion), "--side", "client", "--output", w2a(fwd(mojmaps)) })) return false;
+
+        if (!jarValid(officialClient)) {
+            const std::wstring tmp = officialClient + L".tmp";
+            DeleteFileW(tmp.c_str());
+            if (!runArt({ "--input", w2a(fwd(clientJar)), "--output", w2a(fwd(tmp)), "--names", w2a(fwd(mojmaps)), "--ann-fix", "--ids-fix", "--src-fix", "--record-fix", "--strip-sigs", "--reverse" })) {
+                DeleteFileW(tmp.c_str());
+                return false;
+            }
+            if (!jarValid(tmp)) {
+                WriteLogF(L"Forge official client incomplete after rename tool: %s", officialClient.c_str());
+                DeleteFileW(tmp.c_str());
+                return false;
+            }
+            DeleteFileW(officialClient.c_str());
+            if (!MoveFileExW(tmp.c_str(), officialClient.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+                WriteLogF(L"Forge official client rename failed err=%u: %s", GetLastError(), officialClient.c_str());
+                return false;
+            }
+        }
+        cleanInput = officialClient;
+    }
+
+    EnsureDirectoryTree(GetParentDir(patchedClient));
+    const std::wstring tmp = patchedClient + L".tmp";
+    DeleteFileW(tmp.c_str());
+    std::vector<std::string> patchArgs = {
+        "--clean", w2a(fwd(cleanInput)),
+        "--output", w2a(fwd(tmp)),
+        "--apply", w2a(fwd(binPatch)),
+        "--data", "--unpatched",
+    };
+    if (CompareVersionNumbers(w2a(binaryPatcherVersion), "1.3.0") >= 0) {
+        patchArgs.insert(patchArgs.end(), { "--store", "--marker", ".forge_patched_minecraft" });
+    }
+    if (!runPatcher(patchArgs)) {
+        DeleteFileW(tmp.c_str());
+        return false;
+    }
+    if (!jarValid(tmp)) {
+        WriteLogF(L"Forge patched client incomplete after binary patch: %s", patchedClient.c_str());
+        DeleteFileW(tmp.c_str());
+        return false;
+    }
+    DeleteFileW(patchedClient.c_str());
+    if (!MoveFileExW(tmp.c_str(), patchedClient.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+        WriteLogF(L"Forge patched client rename failed err=%u: %s", GetLastError(), patchedClient.c_str());
+        return false;
+    }
+
+    WriteLogF(L"Forge client artifact prepared forge=%s patched=%s",
+        forgeMavenVersion.c_str(), FileStamp(patchedClient).c_str());
+    return true;
 }
 
 static bool PrepareForgeClientArtifacts(
@@ -154,10 +258,18 @@ static bool PrepareForgeClientArtifacts(
     const std::wstring& autoRenamingToolVersion) {
     const std::wstring forgeMavenVersion = ForgeMavenVersion(launchVersion);
     const std::wstring mcpVersion = ForgeMcpVersion(manifestMcpVersion, extraGameArgs);
-    if (forgeMavenVersion.empty() || mcpVersion.empty()) {
-        WriteLogF(L"Forge prep missing version metadata forge=%s mcp=%s",
-            forgeMavenVersion.c_str(), mcpVersion.c_str());
+    if (forgeMavenVersion.empty()) {
+        WriteLog(L"Forge prep missing Forge version");
         return false;
+    }
+    if (mcpVersion.empty()) {
+        return PrepareForgeOfficialClientArtifacts(
+            env,
+            runtimeRoot,
+            clientJar,
+            minecraftVersion,
+            forgeMavenVersion,
+            binaryPatcherVersion);
     }
 
     const std::wstring toolsVersion = installToolsVersion.empty() ? L"1.4.1" : installToolsVersion;
@@ -332,7 +444,6 @@ static bool IsForgePrepOrModuleJar(const std::wstring& entry) {
     std::replace(p.begin(), p.end(), L'\\', L'/');
     std::transform(p.begin(), p.end(), p.begin(), [](wchar_t c) { return (wchar_t)towlower(c); });
     static const wchar_t* kExcluded[] = {
-        L"/org/ow2/asm/",
         L"/cpw/mods/bootstraplauncher/",
         L"/cpw/mods/securejarhandler/",
         L"/net/minecraftforge/jarjarfilesystems/",
@@ -344,6 +455,10 @@ static bool IsForgePrepOrModuleJar(const std::wstring& entry) {
         L"/net/minecraftforge/binarypatcher/",
         L"/net/minecraftforge/forgeautorenamingtool/",
         L"-installer.jar",
+        // installertools dep, not a game library. iris jij's glsl-transformer which ships an
+        // unrelocated org.apache.commons.collections4.trie, so both become modules exporting the
+        // same package and the game layer fails to resolve
+        L"/org/apache/commons/commons-collections4/",
         L"/versions/",
     };
     for (const wchar_t* needle : kExcluded) {
@@ -375,6 +490,8 @@ static bool PreferForgeMavenVersion(
 
 static std::wstring BuildForgeGameClassPath(
     const std::wstring& fullClassPath,
+    const std::wstring& universalJar,
+    const std::wstring& patchedClient,
     size_t* keptOut,
     size_t* droppedOut) {
     std::vector<std::wstring> survivors;
@@ -389,7 +506,6 @@ static std::wstring BuildForgeGameClassPath(
         }
         survivors.push_back(entry);
     }
-
     std::vector<std::wstring> keys;
     std::map<std::wstring, std::wstring> chosenEntry;
     std::map<std::wstring, std::wstring> chosenVer;
@@ -425,6 +541,16 @@ static std::wstring BuildForgeGameClassPath(
     for (const std::wstring& k : keys) {
         if (!out.empty()) out += L";";
         out += chosenEntry[k];
+        kept++;
+    }
+    if (FileExistsNonEmpty(universalJar)) {
+        if (!out.empty()) out += L";";
+        out += universalJar;
+        kept++;
+    }
+    if (FileExistsNonEmpty(patchedClient)) {
+        if (!out.empty()) out += L";";
+        out += patchedClient;
         kept++;
     }
     if (keptOut) *keptOut = kept;
@@ -485,8 +611,12 @@ void ForgeAdjustClasspath(const LoaderJvmContext& ctx, std::wstring& classPath, 
             ctx.launchVersion,
             ctx.neoFormVersion,
             ctx.extraGameArgs)) {
+        const std::wstring universalJar = ctx.libraryDir + L"\\" +
+            MavenPath(L"net.minecraftforge", L"forge", ForgeMavenVersion(ctx.launchVersion), L"universal");
+        const std::wstring patchedClient = ctx.libraryDir + L"\\" +
+            MavenPath(L"net.minecraftforge", L"forge", ForgeMavenVersion(ctx.launchVersion), L"client");
         size_t kept = 0, dropped = 0;
-        classPath = BuildForgeGameClassPath(classPath, &kept, &dropped);
+        classPath = BuildForgeGameClassPath(classPath, universalJar, patchedClient, &kept, &dropped);
         result.effectiveClassPath = classPath;
         result.neoForgeStartedWithGameClassPath = true;
         WriteTextFile(ctx.launcherLogDir + L"\\java_classpath_final.txt", classPath);
@@ -542,8 +672,12 @@ bool ForgePrepareArtifactsAfterJvm(
         return false;
     }
 
+    const std::wstring universalJar = ctx.libraryDir + L"\\" +
+        MavenPath(L"net.minecraftforge", L"forge", ForgeMavenVersion(ctx.launchVersion), L"universal");
+    const std::wstring patchedClient = ctx.libraryDir + L"\\" +
+        MavenPath(L"net.minecraftforge", L"forge", ForgeMavenVersion(ctx.launchVersion), L"client");
     size_t kept = 0, dropped = 0;
-    effectiveClassPath = BuildForgeGameClassPath(effectiveClassPath, &kept, &dropped);
+    effectiveClassPath = BuildForgeGameClassPath(effectiveClassPath, universalJar, patchedClient, &kept, &dropped);
     LaunchSetJavaSystemProperty(env, L"java.class.path", effectiveClassPath);
     LaunchSetJavaSystemProperty(env, L"legacyClassPath", effectiveClassPath);
     WriteTextFile(ctx.launcherLogDir + L"\\java_classpath_final.txt", effectiveClassPath);
