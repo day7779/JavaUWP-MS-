@@ -89,3 +89,6 @@ __pycache__/
 # Local auth config
 /MC.Xbox/launch_auth.json
 buildcmd.txt
+
+# shared xbox dev mode tooling config, machine-local
+xbox.json
