@@ -608,18 +608,52 @@ foreach ($dll in Get-MesaRuntimeDllNames) {
     }
 }
 
-Write-Host "Generating official download manifest..."
-& (Join-Path $root "scripts\new-download-manifest.ps1") `
+$manifestGenerator = Join-Path $root "scripts\new-download-manifest.ps1"
+$manifestCacheRoot = Join-Path (Get-ConfigPath "StagingDir") "cache\manifests"
+Ensure-Dir $manifestCacheRoot
+
+function Copy-CachedVersionManifest {
+    param(
+        [Parameter(Mandatory = $true)][string]$MinecraftVersion,
+        [Parameter(Mandatory = $true)][string]$Loader,
+        [Parameter(Mandatory = $true)][string]$LoaderVersion,
+        [Parameter(Mandatory = $true)][string]$OutputPath
+    )
+
+    $targetId = "$MinecraftVersion-$Loader-$LoaderVersion"
+    $cachePath = Join-Path $manifestCacheRoot "$targetId.tsv"
+    $stampPath = "$cachePath.stamp"
+    $stamp = New-BuildStamp `
+        -Values @("download_manifest", $MinecraftVersion, $Loader, $LoaderVersion) `
+        -ContentFiles @($manifestGenerator, (Join-Path $root "scripts\common.ps1"))
+
+    if (Test-BuildStampCurrent -StampPath $stampPath -Stamp $stamp -RequiredOutputs @($cachePath)) {
+        Write-Host "Download manifest up to date: $targetId"
+    } else {
+        Write-Host "Generating download manifest: $targetId"
+        & $manifestGenerator `
+            -MinecraftVersion $MinecraftVersion `
+            -Loader $Loader `
+            -LoaderVersion $LoaderVersion `
+            -OutputPath $cachePath
+        Set-BuildStamp -StampPath $stampPath -Stamp $stamp
+    }
+
+    Ensure-Dir (Split-Path $OutputPath -Parent)
+    Copy-Item -LiteralPath $cachePath -Destination $OutputPath -Force
+}
+
+$defaultDownloadManifest = Join-Path $pkg "download_manifest.tsv"
+Copy-CachedVersionManifest `
     -MinecraftVersion $ProjectConfig.MinecraftVersion `
     -Loader "fabric" `
     -LoaderVersion $ProjectConfig.FabricLoaderVersion `
-    -FabricLoaderVersion $ProjectConfig.FabricLoaderVersion `
-    -OutputPath (Join-Path $pkg "download_manifest.tsv")
+    -OutputPath $defaultDownloadManifest
 
 $manifestsDir = Join-Path $pkg "runtime\manifests"
 Ensure-Dir $manifestsDir
 $defaultTargetId = "$($ProjectConfig.MinecraftVersion)-fabric-$($ProjectConfig.FabricLoaderVersion)"
-Copy-Item -Force (Join-Path $pkg "download_manifest.tsv") (Join-Path $manifestsDir "$defaultTargetId.tsv")
+Copy-Item -Force $defaultDownloadManifest (Join-Path $manifestsDir "$defaultTargetId.tsv")
 Write-Host "Default per-version manifest: $defaultTargetId.tsv"
 
 if (-not $SkipVersionManifests) {
@@ -629,9 +663,8 @@ if (-not $SkipVersionManifests) {
         $targetId = "$($row.minecraftVersion)-$loader-$lv"
         if ($targetId -eq $defaultTargetId) { continue }
         $out = Join-Path $manifestsDir "$targetId.tsv"
-        Write-Host "Generating per-version manifest: $targetId"
         try {
-            & (Join-Path $root "scripts\new-download-manifest.ps1") `
+            Copy-CachedVersionManifest `
                 -MinecraftVersion $row.minecraftVersion `
                 -Loader $loader `
                 -LoaderVersion $lv `

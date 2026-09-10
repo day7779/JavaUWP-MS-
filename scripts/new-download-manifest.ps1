@@ -375,12 +375,17 @@ function Get-ForgeInstallerVersion([string]$MinecraftVersion, [string]$Version) 
     return "$MinecraftVersion-$Version"
 }
 
+function Get-LoaderInstallerCacheDir {
+    # under staging so CI can restore it, the system temp dir is empty on every runner
+    return Join-Path (Get-ConfigPath "CacheDir") "loader-installers"
+}
+
 function Get-LoaderProfile([string]$Loader, [string]$MinecraftVersion, [string]$LoaderVersion) {
     if ($Loader -eq "fabric") {
         return Get-Json "https://meta.fabricmc.net/v2/versions/loader/$MinecraftVersion/$LoaderVersion/profile/json"
     }
 
-    $tmp = Join-Path ([System.IO.Path]::GetTempPath()) "MinecraftJavaUWP-loader-metadata"
+    $tmp = Get-LoaderInstallerCacheDir
     Ensure-Dir $tmp
     if ($Loader -eq "forge") {
         $forgeVersion = Get-ForgeInstallerVersion $MinecraftVersion $LoaderVersion
@@ -424,7 +429,7 @@ function Get-LoaderInstallProfile([string]$Loader, [string]$MinecraftVersion, [s
 }
 
 function Get-LoaderInstallerJarPath([string]$Loader, [string]$MinecraftVersion, [string]$LoaderVersion) {
-    $tmp = Join-Path ([System.IO.Path]::GetTempPath()) "MinecraftJavaUWP-loader-metadata"
+    $tmp = Get-LoaderInstallerCacheDir
     if ($Loader -eq "forge") {
         $forgeVersion = Get-ForgeInstallerVersion $MinecraftVersion $LoaderVersion
         return Join-Path $tmp "forge-$forgeVersion-installer.jar"
