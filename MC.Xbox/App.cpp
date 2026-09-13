@@ -34,6 +34,7 @@
 #include "loader.h"
 #include "runtime_manager.h"
 #include "minecraft_launch.h"
+#include "telemetry.h"
 
 // ICoreWindowInterop is forward-declared without a GUID, so IID_PPV_ARGS
 // cannot use it directly. Redeclare it with the correct uuid here.
@@ -90,6 +91,22 @@ bool CoreWindowAcceptsInput() {
     return changed == 0 || (static_cast<unsigned long long>(GetTickCount64()) - changed) >= 250ULL;
 }
 
+// stops an os suspend from being reported as a crash
+static void MarkLaunchSuspendedIfRunning() {
+    const std::wstring runtimeRoot = GetEnvVarString(L"MC_RUNTIME_DIR");
+    if (runtimeRoot.empty()) return;
+    if (GetFileAttributesW(CrashLaunchMarkerPath(runtimeRoot).c_str()) == INVALID_FILE_ATTRIBUTES) return;
+    if (!WriteTextFile(LaunchSuspendedMarkerPath(runtimeRoot), L"suspended\n")) {
+        WriteLog(L"Minecraft suspension marker could not be written");
+    }
+}
+
+static void ClearLaunchSuspendedMarker() {
+    const std::wstring runtimeRoot = GetEnvVarString(L"MC_RUNTIME_DIR");
+    if (runtimeRoot.empty()) return;
+    DeleteFileW(LaunchSuspendedMarkerPath(runtimeRoot).c_str());
+}
+
 static void RegisterLifecycleHandlers(ICoreApplication* coreApp) {
     if (!coreApp) return;
 
@@ -98,6 +115,8 @@ static void RegisterLifecycleHandlers(ICoreApplication* coreApp) {
         Callback<IEventHandler<SuspendingEventArgs*>>(
             [](IInspectable*, ISuspendingEventArgs*) -> HRESULT {
                 LogLifecycleEvent(L"CoreApplication Suspending");
+                MarkLaunchSuspendedIfRunning();
+                telemetry::QueueSuspend();
                 return S_OK;
             }).Get(),
         &token);
@@ -109,6 +128,7 @@ static void RegisterLifecycleHandlers(ICoreApplication* coreApp) {
         Callback<IEventHandler<IInspectable*>>(
             [](IInspectable*, IInspectable*) -> HRESULT {
                 WriteLog(L"CoreApplication Resuming");
+                ClearLaunchSuspendedMarker();
                 return S_OK;
             }).Get(),
         &token);
@@ -418,6 +438,8 @@ public:
         {
             wchar_t lp[MAX_PATH];
             swprintf_s(lp, L"%s\\mc_launch.log", g_logDir.c_str());
+            // capture the crash sources before the archive removes them
+            telemetry::PrepareHardCrash(exeDir);
             ArchivePreviousCrashIfNeeded(exeDir);
             FILE* clf = nullptr;
             _wfopen_s(&clf, lp, L"w");
@@ -427,6 +449,8 @@ public:
         SetCurrentDirectoryW(exeDir.c_str());
         SetEnvironmentVariableW(L"MC_RUNTIME_DIR", exeDir.c_str());
         SetEnvironmentVariableW(L"MC_LOG_DIR", g_logDir.c_str());
+        telemetry::ReportHardCrash(exeDir);
+        telemetry::FlushQueueAsync();
         const std::wstring graphicsRuntime = DetectGraphicsRuntimeName();
         SetEnvironmentVariableW(L"MC_GRAPHICS_RUNTIME", graphicsRuntime.c_str());
         SetEnvironmentVariableW(L"mesa_glthread", L"true");

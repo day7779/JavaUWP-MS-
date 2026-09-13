@@ -1,5 +1,6 @@
 package banditvault.neoforgecontroller.mixin;
 
+import banditvault.controllercore.ControllerLog;
 import banditvault.neoforgecontroller.NeoForgeControllerCompat;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
 import net.minecraft.client.gui.screens.TitleScreen;
@@ -11,9 +12,20 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 @Mixin(value = TitleScreen.class, remap = false)
 public abstract class NeoForgeControllerTitleScreenMixin {
+    private static boolean banditvault$playableLogged = false;
+
     @Inject(method = "extractRenderState", at = @At("HEAD"), remap = false)
     private void banditvault$updateControllerCursor(GuiGraphicsExtractor graphics, int mouseX, int mouseY, float delta, CallbackInfo ci) {
+        banditvault$logPlayableOnce();
         NeoForgeControllerCompat.updateScreenCursorBeforeRender((TitleScreen) (Object) this, mouseX, mouseY);
+    }
+
+    private static synchronized void banditvault$logPlayableOnce() {
+        if (banditvault$playableLogged) {
+            return;
+        }
+        banditvault$playableLogged = true;
+        ControllerLog.log("xbox_compat", "banditvault:playable");
     }
 
     @ModifyVariable(method = "extractRenderState", at = @At("HEAD"), ordinal = 0, argsOnly = true, remap = false)

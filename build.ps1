@@ -41,6 +41,11 @@ function Add-BuildFailure {
     Write-Warning "${Stage} skipped for ${Target}: $Reason"
 }
 
+# capture inherited overrides before applying command line values
+$inheritedMcVersion     = $env:MC_VERSION
+$inheritedFabricLoader  = $env:FABRIC_LOADER_VERSION
+$inheritedAssetIndex    = $env:MC_ASSET_INDEX
+
 # Push command-line overrides into the environment before sourcing config.
 # scripts/config.ps1 honors these so every downstream script (compat mod,
 # patch-fabric, etc.) sees the same chosen version.
@@ -103,12 +108,13 @@ $appVersionBase = "$($baseVersionParts[0]).$($baseVersionParts[1]).$($baseVersio
 # Auto-increment local builds from the package manifest base version so installs
 # update in place while CI can provide an exact APPX_VERSION for nightlies.
 $verFile = Join-Path $root ".local\app_build.txt"
+$verFileExisted = Test-Path $verFile
 if ($AppxVersion) {
     Assert-AppxVersion $AppxVersion
     $appVersion = $AppxVersion
 } else {
     $verRev = [int]$baseVersionParts[3]
-    if (Test-Path $verFile) {
+    if ($verFileExisted) {
         $prevParts = ((Get-Content $verFile -Raw).Trim()) -split '\.'
         $prevBase = if ($prevParts.Count -eq 4) { "$($prevParts[0]).$($prevParts[1]).$($prevParts[2])" } else { "" }
         if ($prevBase -eq $appVersionBase) { $verRev = [int]$prevParts[3] + 1 }
@@ -119,6 +125,49 @@ if ($AppxVersion) {
 Ensure-Dir (Split-Path $verFile)
 Set-Content -Path $verFile -Value $appVersion -NoNewline
 $appx = Join-Path $outDir ("BanditLauncher_{0}.appx" -f $appVersion)
+
+$mcVersionSource = if ($McVersion) {
+    "-McVersion"
+} elseif ($inheritedMcVersion) {
+    "MC_VERSION inherited from this shell"
+} else {
+    "config.ps1 default"
+}
+$fabricLoaderSource = if ($FabricLoader) {
+    "-FabricLoader"
+} elseif ($inheritedFabricLoader) {
+    "FABRIC_LOADER_VERSION inherited from this shell"
+} else {
+    "config.ps1 default"
+}
+$appVersionSource = if ($AppxVersion) {
+    "-AppxVersion"
+} elseif ($verFileExisted) {
+    ".local\app_build.txt"
+} else {
+    "fresh worktree, first build off the manifest base"
+}
+
+Write-Host ""
+Write-Host "Resolved build target:"
+Write-Host ("  MC version      {0}  ({1})" -f $ProjectConfig.MinecraftVersion, $mcVersionSource)
+Write-Host ("  Fabric loader   {0}  ({1})" -f $ProjectConfig.FabricLoaderVersion, $fabricLoaderSource)
+Write-Host ("  Asset index     {0}" -f $ProjectConfig.MinecraftAssetIndex)
+Write-Host ("  Appx version    {0}  ({1})" -f $appVersion, $appVersionSource)
+Write-Host ""
+
+foreach ($inherited in @(
+    @{ Name = "MC_VERSION";            Value = $inheritedMcVersion;    Param = $McVersion },
+    @{ Name = "FABRIC_LOADER_VERSION"; Value = $inheritedFabricLoader; Param = $FabricLoader },
+    @{ Name = "MC_ASSET_INDEX";        Value = $inheritedAssetIndex;   Param = $AssetIndex })) {
+    if ($inherited.Value -and -not $inherited.Param) {
+        Write-Warning ("{0}={1} was already set in this shell and is retargeting this build. Clear it with `$env:{0} = `$null, or open a new terminal." -f $inherited.Name, $inherited.Value)
+    }
+}
+
+if (-not $AppxVersion -and -not $verFileExisted) {
+    Write-Warning "No .local\app_build.txt in this worktree, so the appx stamps $appVersion. Anything already installed on the console at a higher version will not be replaced by it."
+}
 
 function Stop-BuildBlockingProcesses {
     param(
@@ -346,7 +395,7 @@ Push-Location (Join-Path $root "MC.Xbox")
 $env:INCLUDE = "$mcBuildDir;$($tools.MsvcRoot)\include;${sdkRoot}Include\$sdkVer\ucrt;${sdkRoot}Include\$sdkVer\shared;${sdkRoot}Include\$sdkVer\um;${sdkRoot}Include\$sdkVer\winrt;${sdkRoot}Include\$sdkVer\cppwinrt;$jreSrc\include;$jreSrc\include\win32"
 $env:LIB = "$($tools.MsvcRoot)\lib\x64;${sdkRoot}Lib\$sdkVer\ucrt\x64;${sdkRoot}Lib\$sdkVer\um\x64"
 
-& $tools.ClExe App.cpp launch\app_globals.cpp common\launcher_common.cpp common\crash_report.cpp mods\mod_defaults.cpp mods\modpack_io.cpp mods\world_io.cpp net\http_client.cpp profiles\profiles.cpp net\remote_file_server.cpp net\web_relay_server.cpp auth\minecraft_auth.cpp ui\launcher_ui.cpp ui\launcher_mouse.cpp ui\mods_ui_globals.cpp mods\mods_browser.cpp launch\runtime_manager.cpp launch\minecraft_launch.cpp launch\launch_internal.cpp launch\loaders\loader_common.cpp launch\loaders\loader.cpp launch\loaders\fabric.cpp launch\loaders\neoforge.cpp launch\loaders\forge.cpp third_party\miniz\miniz.c /std:c++17 /EHsc $CommonClFlags /O2 /GL /Gw /MP /arch:AVX2 /DNDEBUG /D_UNICODE /DUNICODE /D_WIN32_WINNT=0x0A00 /D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS /DMINIZ_NO_STDIO /DMINIZ_NO_TIME /I. /Icommon /Inet /Iauth /Iui /Imods /Iprofiles /Ilaunch /Ilaunch\loaders /I..\mouse_support /Fo"$mcBuildDir\" `
+& $tools.ClExe App.cpp launch\app_globals.cpp common\launcher_common.cpp common\crash_report.cpp mods\mod_defaults.cpp mods\modpack_io.cpp mods\world_io.cpp net\http_client.cpp profiles\profiles.cpp net\remote_file_server.cpp net\web_relay_server.cpp auth\minecraft_auth.cpp ui\launcher_ui.cpp ui\launcher_mouse.cpp ui\mods_ui_globals.cpp mods\mods_browser.cpp launch\runtime_manager.cpp launch\minecraft_launch.cpp launch\launch_internal.cpp launch\loaders\loader_common.cpp launch\loaders\loader.cpp launch\loaders\fabric.cpp launch\loaders\neoforge.cpp launch\loaders\forge.cpp telemetry\telemetry.cpp telemetry\crash_fingerprint.cpp telemetry\crash_parse.cpp telemetry\compat_feed.cpp third_party\miniz\miniz.c /std:c++17 /EHsc $CommonClFlags /O2 /GL /Gw /MP /arch:AVX2 /DNDEBUG /D_UNICODE /DUNICODE /D_WIN32_WINNT=0x0A00 /D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS /DMINIZ_NO_STDIO /DMINIZ_NO_TIME /I. /Icommon /Inet /Iauth /Iui /Imods /Iprofiles /Ilaunch /Ilaunch\loaders /Itelemetry /I..\mouse_support /Fo"$mcBuildDir\" `
     /DWINAPI_FAMILY=WINAPI_FAMILY_APP `
     /link /LTCG /SUBSYSTEM:WINDOWS /ENTRY:wWinMainCRTStartup /MACHINE:X64 `
     /OUT:"$mcExe" kernel32.lib shell32.lib runtimeobject.lib windowsapp.lib ole32.lib oleaut32.lib d2d1.lib dwrite.lib d3d11.lib dxgi.lib windowscodecs.lib winhttp.lib bcrypt.lib ws2_32.lib

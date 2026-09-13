@@ -14,6 +14,8 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 public abstract class MinecraftClientProbeMixin {
     private static long banditvault$tickCount = 0L;
     private static boolean banditvault$uncaughtHandlerInstalled = false;
+    private static boolean banditvault$playableLogged = false;
+    private static boolean banditvault$clientConstructed = false;
 
     @Shadow
     public class_437 field_1755;
@@ -21,6 +23,7 @@ public abstract class MinecraftClientProbeMixin {
     @Inject(method = "<init>", at = @At("TAIL"))
     private void banditvault$logClientConstructed(class_542 args, CallbackInfo ci) {
         XboxCompatLog.log("MinecraftClient constructed");
+        banditvault$clientConstructed = true;
         banditvault$installUncaughtExceptionHandler();
     }
 
@@ -42,6 +45,18 @@ public abstract class MinecraftClientProbeMixin {
     @Inject(method = "method_1507", at = @At("TAIL"))
     private void banditvault$logSetScreenTail(class_437 screen, CallbackInfo ci) {
         XboxCompatLog.log("setScreen tail -> current=" + banditvault$screenName(this.field_1755));
+        if (banditvault$clientConstructed && this.field_1755 != null) {
+            banditvault$logPlayableOnce();
+        }
+    }
+
+    // intermediary names prevent a title screen type check here
+    private static synchronized void banditvault$logPlayableOnce() {
+        if (banditvault$playableLogged) {
+            return;
+        }
+        banditvault$playableLogged = true;
+        XboxCompatLog.log("banditvault:playable");
     }
 
     @Inject(method = "method_1574", at = @At("HEAD"))
