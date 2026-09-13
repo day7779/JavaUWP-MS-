@@ -21,5 +21,20 @@ std::string MakeFormBody(std::initializer_list<std::pair<std::string, std::strin
 std::string NormalizeMinecraftUuid(const std::string& value);
 
 HttpResult HttpPostString(const wchar_t* url, const std::string& body, const wchar_t* mediaType);
+
+// the timeout covers the response and its body
+HttpResult HttpPostStringTimed(
+    const wchar_t* url,
+    const std::string& body,
+    const wchar_t* mediaType,
+    unsigned timeoutMs);
+
 HttpResult HttpGetBearer(const wchar_t* url, const std::string& token);
 HttpResult HttpGetString(const wchar_t* url);
+
+// returns the response etag and an empty body for status 304
+HttpResult HttpGetConditionalTimed(
+    const wchar_t* url,
+    const std::string& etag,
+    unsigned timeoutMs,
+    std::string& outEtag);

@@ -2,6 +2,7 @@
 
 #include "modpack_io.h"
 #include "auth_screen.h"
+#include "compat_feed.h"
 #include "runtime_manager.h"
 #include "http_client.h"
 #include "launcher_common.h"
@@ -1107,6 +1108,23 @@ static unsigned StartDetailFetch(const ModCard& card) {
     return id;
 }
 
+static void ApplyCompatFlag(AuthUiState& state, const ModCard& card) {
+    state.modsCompatWarn = false;
+    state.modsCompatAcked = false;
+    state.modsCompatNote.clear();
+    if (card.isModpack) return;
+
+    const LaunchTarget target = CurrentModsTarget(state);
+    const compat::Flag flag = compat::Lookup(
+        card.slug, card.projectId, target.minecraftVersion, target.loader);
+    if (!flag.found) return;
+
+    state.modsCompatWarn = true;
+    state.modsCompatNote = flag.note.empty()
+        ? (card.title + L" is known to fail on this console.")
+        : flag.note;
+}
+
 static void StartInstallJob(const ModCard& card, const std::wstring& runtimeRoot, const LaunchTarget& target) {
     if (g_installRunning.load()) return;
     g_installRunning.store(true);
@@ -1737,6 +1755,7 @@ void ShowModsPage(
     AuthUiState& state,
     const std::wstring& runtimeRoot) {
     const std::wstring userModsDir = runtimeRoot + L"\\game\\user-mods";
+    compat::RefreshAsync();
     state.showMainMenu = false;
     state.showModsPage = true;
     state.title = L"Bandit Launcher";
@@ -2246,7 +2265,13 @@ void ShowModsPage(
                 state.modsDetailOpen = false;
                 state.status.clear();
             } else if ((selectDown && !selectWasDown) || (enterDown && !enterWasDown) || clickActivate) {
-                StartInstallJob(state.modsDetailCard, runtimeRoot, CurrentModsTarget(state));
+                if (state.modsCompatWarn && !state.modsCompatAcked) {
+                    state.modsCompatAcked = true;
+                    state.status = L"Press install again to add it anyway";
+                    state.isError = false;
+                } else {
+                    StartInstallJob(state.modsDetailCard, runtimeRoot, CurrentModsTarget(state));
+                }
             } else if (upDown && !upWasDown) {
                 state.modsDetailScroll = (std::max)(0, state.modsDetailScroll - 2);
             } else if (downDown && !downWasDown) {
@@ -2485,6 +2510,7 @@ void ShowModsPage(
                     state.modsDetailMeta.clear();
                     state.modsDetailLoading = true;
                     state.modsDetailReqId = StartDetailFetch(selected);
+                    ApplyCompatFlag(state, selected);
                     state.status.clear();
                     state.isError = false;
                 }

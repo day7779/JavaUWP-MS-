@@ -5,12 +5,14 @@
 #include "launch_internal.h"
 #include "loader.h"
 #include "loader_common.h"
+#include "launch_diagnostics.h"
 #include "neoforge.h"
 #include "launcher_common.h"
 #include "mod_defaults.h"
 #include "mods_browser.h"
 #include "profiles.h"
 #include "runtime_manager.h"
+#include "telemetry.h"
 
 #include <jni.h>
 #include <roapi.h>
@@ -59,6 +61,19 @@ static void DestroyEmbeddedJvm(JavaVM*& vm, JNIEnv*& env) {
 
 static constexpr wchar_t kEGLNativeWindowTypeProperty[] = L"EGLNativeWindowTypeProperty";
 
+static unsigned long long ShimPresentedFrames() {
+    using ReaderFn = unsigned long long (*)();
+    static ReaderFn reader = nullptr;
+    // lwjgl loads the shim after startup
+    if (!reader) {
+        HMODULE shim = GetModuleHandleW(L"glfw.dll");
+        if (shim) {
+            reader = reinterpret_cast<ReaderFn>(GetProcAddress(shim, "BanditShimPresentedFrames"));
+        }
+    }
+    return reader ? reader() : 0ull;
+}
+
 static volatile LONG g_logTailerRunning = 0;
 static HANDLE g_logTailerThreads[8] = {};
 static int g_logTailerThreadCount = 0;
@@ -68,6 +83,8 @@ static HANDLE g_redirectedStderrHandle = INVALID_HANDLE_VALUE;
 static const ULONGLONG kLogTailerFastWindowMs = 120000;
 static const DWORD kLogTailerFastPollMs = 250;
 static const DWORD kLogTailerIdlePollMs = 2000;
+
+static constexpr char kPlayableMarker[] = "banditvault:playable";
 
 struct LogTailerConfig {
     std::wstring path;
@@ -298,6 +315,10 @@ static DWORD WINAPI LogTailerThreadProc(LPVOID param) {
     LARGE_INTEGER offset = {};
     char buffer[4096];
     bool attached = false;
+    // keep enough overlap for a marker split across reads
+    const bool watchPlayable = (label == L"xbox_compat.log");
+    bool playableSent = false;
+    std::string carry;
     // 5 tailers at 250ms is 20 file opens a second against files the jvm is writing
     ULONGLONG startedAt = GetTickCount64();
 
@@ -328,6 +349,16 @@ static DWORD WINAPI LogTailerThreadProc(LPVOID param) {
                         break;
                     }
                     offset.QuadPart += bytesRead;
+                    if (watchPlayable && !playableSent) {
+                        carry.append(buffer, bytesRead);
+                        if (carry.find(kPlayableMarker) != std::string::npos) {
+                            playableSent = true;
+                            carry.clear();
+                            telemetry::SendPlayable();
+                        } else if (carry.size() > 1024) {
+                            carry.erase(0, carry.size() - 64);
+                        }
+                    }
                     LogUtf8Chunk(label, buffer, bytesRead);
                 }
             }
@@ -1266,8 +1297,8 @@ bool RunEmbeddedMinecraft(const std::wstring& exeDir,
     }
     fprintf(af, "# Main class\n%s\n", w2a(effectiveMainClass).c_str());
     fprintf(af, "# App args\n");
-    for (const auto& arg : appArgs) {
-        fprintf(af, "%s\n", arg.c_str());
+    for (size_t i = 0; i < appArgs.size(); ++i) {
+        fprintf(af, "%s\n", launchdiag::DiagnosticMinecraftAppArg(appArgs, i).c_str());
     }
     fclose(af);
     WriteLog(L"Embedded JVM options written");
@@ -1371,22 +1402,50 @@ bool RunEmbeddedMinecraft(const std::wstring& exeDir,
         (L"Loading " + loaderLabel).c_str(),
         L"Mods and libraries are starting. The Mojang loading screen appears once graphics initialize.",
         0.64f);
+    const std::wstring modsetHash = telemetry::ComputeModsetHash(userModsDir);
     WriteTextFile(CrashLaunchMarkerPath(exeDir),
         std::wstring(L"minecraftVersion=") + minecraftVersion + L"\n" +
         L"launchVersion=" + launchVersion + L"\n" +
         L"jreDir=" + jreDir + L"\n" +
         L"gameDir=" + gameDir + L"\n" +
-        L"nativesDir=" + nativesDir + L"\n");
+        L"nativesDir=" + nativesDir + L"\n" +
+        L"launcherBuild=" + telemetry::LauncherBuild() + L"\n" +
+        L"loader=" + loader + L"\n" +
+        L"loaderVersion=" + loaderVersion + L"\n" +
+        L"modsetHash=" + modsetHash + L"\n");
+    DeleteFileW(LaunchSuspendedMarkerPath(exeDir).c_str());
+
+    telemetry::LaunchContext telemetryContext;
+    telemetryContext.launcherBuild = telemetry::LauncherBuild();
+    telemetryContext.mcVersion = minecraftVersion;
+    telemetryContext.loader = loader;
+    telemetryContext.loaderVersion = loaderVersion;
+    telemetryContext.modsetHash = modsetHash;
+    const unsigned long long presentedFramesAtLaunch = ShimPresentedFrames();
+    telemetry::BeginLaunch(telemetryContext);
+    telemetry::SendLaunch();
+
     std::atomic<bool> javaMainRunning{ true };
     // getAllStackTraces is a safepoint, every dump stalls the render thread
     const bool alwaysDumpThreads = !GetEnvVarString(L"BANDIT_JAVA_THREAD_DUMPS").empty();
-    std::thread javaMainWatchdog([&javaMainRunning, vm, effectiveMainClass, alwaysDumpThreads]() {
+    std::thread javaMainWatchdog([
+        &javaMainRunning,
+        vm,
+        effectiveMainClass,
+        alwaysDumpThreads,
+        presentedFramesAtLaunch]() {
         // MemoryManager is a winrt static, without an apartment here every read throws
         const HRESULT roHr = RoInitialize(RO_INIT_MULTITHREADED);
         unsigned seconds = 0;
+        bool firstFrameSent = false;
         while (javaMainRunning.load()) {
-            std::this_thread::sleep_for(std::chrono::seconds(5));
-            seconds += 5;
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+            ++seconds;
+            if (!firstFrameSent && ShimPresentedFrames() > presentedFramesAtLaunch) {
+                firstFrameSent = true;
+                telemetry::SendFirstFrame();
+            }
+            if ((seconds % 5) != 0) continue;
             if (javaMainRunning.load()) {
                 unsigned long long limitMb = 0;
                 unsigned long long usedMb = 0;
@@ -1419,17 +1478,22 @@ bool RunEmbeddedMinecraft(const std::wstring& exeDir,
         LogTextFileTail(javaLog, L"java_output.log");
         LogTextFileTail(stderrLogPath, L"stderr_stream.log");
         WriteLog(L"Minecraft requested return to launcher");
+        telemetry::SendExit();
+        telemetry::EndLaunch();
         StopLogTailers();
         DeleteFileW(CrashLaunchMarkerPath(exeDir).c_str());
         return true;
     }
 
-    if (CheckAndLogJavaException(env, L"CallStaticVoidMethod(main)")) {
+    if (CheckAndLogJavaMainException(env, L"CallStaticVoidMethod(main)")) {
         LogTextFileTail(javaLog, L"java_output.log");
         LogTextFileTail(stderrLogPath, L"stderr_stream.log");
         WriteLog(L"Embedded JVM failed after startup; terminating host process to avoid JVM/native reuse");
         StopLogTailers();
         CreateCrashReportZip(exeDir, L"Java exception after Minecraft startup");
+        // the local crash screen links to the zip written above
+        telemetry::ReportSoftCrash(exeDir);
+        telemetry::EndLaunch();
         DeleteFileW(CrashLaunchMarkerPath(exeDir).c_str());
         ExitProcess(1);
         return false;
@@ -1438,8 +1502,9 @@ bool RunEmbeddedMinecraft(const std::wstring& exeDir,
     WriteLogF(L"%s.main returned", effectiveMainClass.c_str());
     g_minecraftRunning.store(false);
     WriteLog(L"Minecraft exited normally; returning to launcher menu");
+    telemetry::SendExit();
+    telemetry::EndLaunch();
     StopLogTailers();
     DeleteFileW(CrashLaunchMarkerPath(exeDir).c_str());
     return true;
 }
-
