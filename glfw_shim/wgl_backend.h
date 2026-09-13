@@ -139,7 +139,7 @@ static bool MakeCurrent(bool bind) {
     if (!p_makecur) return false;
     return bind ? (p_makecur(s_dc, s_ctx) != 0) : (p_makecur(nullptr, nullptr) != 0);
 }
-static void Swap() { if (p_swap && s_dc) p_swap(s_dc); }
+static bool Swap() { return p_swap && s_dc && p_swap(s_dc) != 0; }
 static bool SetSwapInterval(int interval) {
     if (!p_swapinterval && p_getproc) p_swapinterval = (PFN_wglSwapIntervalEXT)p_getproc("wglSwapIntervalEXT");
     if (!p_swapinterval) { Log("wgl wglSwapIntervalEXT unavailable"); return false; }

@@ -1,12 +1,160 @@
 #include "launch_internal.h"
 
+#include "crash_fingerprint.h"
 #include "launcher_common.h"
+#include "telemetry.h"
 
 #include <algorithm>
 #include <string>
 #include <vector>
 
-bool CheckAndLogJavaException(JNIEnv* env, const wchar_t* stage) {
+namespace {
+
+constexpr int kMaxCauseDepth = 16;
+constexpr jsize kMaxCapturedFrames = 16;
+
+// modified utf8 from GetStringUTFChars is invalid json for some characters
+std::string JStringToUtf8(JNIEnv* env, jstring value) {
+    if (!value) return std::string();
+
+    const jsize length = env->GetStringLength(value);
+    const jchar* chars = env->GetStringChars(value, nullptr);
+    if (!chars) {
+        env->ExceptionClear();
+        return std::string();
+    }
+
+    std::wstring wide(reinterpret_cast<const wchar_t*>(chars), static_cast<size_t>(length));
+    env->ReleaseStringChars(value, chars);
+    return w2a(wide);
+}
+
+std::string JavaClassName(JNIEnv* env, jobject object, jmethodID getClass, jmethodID getName) {
+    if (!object) return std::string();
+
+    jobject cls = env->CallObjectMethod(object, getClass);
+    if (!cls || env->ExceptionCheck()) {
+        env->ExceptionClear();
+        return std::string();
+    }
+
+    jstring name = static_cast<jstring>(env->CallObjectMethod(cls, getName));
+    if (!name || env->ExceptionCheck()) {
+        env->ExceptionClear();
+        return std::string();
+    }
+    return JStringToUtf8(env, name);
+}
+
+int HeapMb(JNIEnv* env, jobject runtime, jmethodID method) {
+    if (!runtime || !method) return 0;
+
+    const jlong bytes = env->CallLongMethod(runtime, method);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        return 0;
+    }
+    return static_cast<int>(bytes / (1024 * 1024));
+}
+
+void CaptureJavaCrashForTelemetry(JNIEnv* env, jthrowable throwable) {
+    if (!env || !throwable) return;
+    if (env->PushLocalFrame(64) != 0) {
+        env->ExceptionClear();
+        return;
+    }
+
+    jclass objectClass = env->FindClass("java/lang/Object");
+    jclass classClass = env->FindClass("java/lang/Class");
+    jclass throwableClass = env->FindClass("java/lang/Throwable");
+    jclass elementClass = env->FindClass("java/lang/StackTraceElement");
+    if (!objectClass || !classClass || !throwableClass || !elementClass) {
+        env->ExceptionClear();
+        env->PopLocalFrame(nullptr);
+        return;
+    }
+
+    jmethodID getClass = env->GetMethodID(objectClass, "getClass", "()Ljava/lang/Class;");
+    jmethodID getName = env->GetMethodID(classClass, "getName", "()Ljava/lang/String;");
+    jmethodID getMessage = env->GetMethodID(throwableClass, "getMessage", "()Ljava/lang/String;");
+    jmethodID getCause = env->GetMethodID(throwableClass, "getCause", "()Ljava/lang/Throwable;");
+    jmethodID getStackTrace = env->GetMethodID(
+        throwableClass, "getStackTrace", "()[Ljava/lang/StackTraceElement;");
+    jmethodID elementToString = env->GetMethodID(elementClass, "toString", "()Ljava/lang/String;");
+    if (!getClass || !getName || !getMessage || !getCause || !getStackTrace || !elementToString) {
+        env->ExceptionClear();
+        env->PopLocalFrame(nullptr);
+        return;
+    }
+
+    const std::string outerClass = JavaClassName(env, throwable, getClass, getName);
+
+    jobject root = throwable;
+    for (int depth = 0; depth < kMaxCauseDepth; ++depth) {
+        jobject cause = env->CallObjectMethod(root, getCause);
+        if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+            break;
+        }
+        // broken throwable chains can point back to themselves
+        if (!cause || env->IsSameObject(cause, root)) break;
+        root = cause;
+    }
+
+    const std::string rootClass = JavaClassName(env, root, getClass, getName);
+
+    std::string message = JStringToUtf8(env, static_cast<jstring>(env->CallObjectMethod(root, getMessage)));
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    if (message.empty() && root != throwable) {
+        message = JStringToUtf8(env, static_cast<jstring>(env->CallObjectMethod(throwable, getMessage)));
+        if (env->ExceptionCheck()) env->ExceptionClear();
+    }
+
+    std::vector<std::string> frames;
+    jobjectArray trace = static_cast<jobjectArray>(env->CallObjectMethod(root, getStackTrace));
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+    } else if (trace) {
+        const jsize count = (std::min)(env->GetArrayLength(trace), kMaxCapturedFrames);
+        for (jsize i = 0; i < count; ++i) {
+            jobject element = env->GetObjectArrayElement(trace, i);
+            if (!element || env->ExceptionCheck()) {
+                env->ExceptionClear();
+                break;
+            }
+            jstring text = static_cast<jstring>(env->CallObjectMethod(element, elementToString));
+            if (!text || env->ExceptionCheck()) {
+                env->ExceptionClear();
+                break;
+            }
+            frames.push_back(JStringToUtf8(env, text));
+        }
+    }
+
+    crashfp::JavaCrash crash = crashfp::Build(outerClass, rootClass, message, frames);
+
+    jclass runtimeClass = env->FindClass("java/lang/Runtime");
+    if (runtimeClass) {
+        jmethodID getRuntime = env->GetStaticMethodID(runtimeClass, "getRuntime", "()Ljava/lang/Runtime;");
+        jobject runtime = getRuntime ? env->CallStaticObjectMethod(runtimeClass, getRuntime) : nullptr;
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        if (runtime) {
+            crash.heapMaxMb = HeapMb(env, runtime, env->GetMethodID(runtimeClass, "maxMemory", "()J"));
+            const int total = HeapMb(env, runtime, env->GetMethodID(runtimeClass, "totalMemory", "()J"));
+            const int free = HeapMb(env, runtime, env->GetMethodID(runtimeClass, "freeMemory", "()J"));
+            crash.heapAtCrashMb = total - free;
+        }
+    }
+
+    env->ExceptionClear();
+    env->PopLocalFrame(nullptr);
+
+    telemetry::RecordJavaCrash(crash);
+}
+
+}
+
+static bool CheckAndLogJavaExceptionImpl(JNIEnv* env, const wchar_t* stage, bool captureForTelemetry) {
     if (!env->ExceptionCheck()) return false;
     WriteLogF(L"Java exception during %s", stage);
 
@@ -16,6 +164,8 @@ bool CheckAndLogJavaException(JNIEnv* env, const wchar_t* stage) {
         WriteLog(L"Java exception object was null after ExceptionOccurred");
         return true;
     }
+
+    if (captureForTelemetry) CaptureJavaCrashForTelemetry(env, throwable);
 
     jclass stringWriterClass = env->FindClass("java/io/StringWriter");
     jclass printWriterClass = env->FindClass("java/io/PrintWriter");
@@ -74,6 +224,14 @@ bool CheckAndLogJavaException(JNIEnv* env, const wchar_t* stage) {
     env->DeleteLocalRef(printWriterClass);
     env->DeleteLocalRef(throwableClass);
     return true;
+}
+
+bool CheckAndLogJavaException(JNIEnv* env, const wchar_t* stage) {
+    return CheckAndLogJavaExceptionImpl(env, stage, false);
+}
+
+bool CheckAndLogJavaMainException(JNIEnv* env, const wchar_t* stage) {
+    return CheckAndLogJavaExceptionImpl(env, stage, true);
 }
 
 bool LaunchInvokeJavaMain(JNIEnv* env, const std::wstring& className, const std::vector<std::string>& args) {

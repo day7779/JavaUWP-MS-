@@ -46,6 +46,9 @@ std::wstring AppStateDir(const std::wstring& runtimeRoot);
 std::wstring LogsCurrentDir(const std::wstring& runtimeRoot);
 std::wstring LogsPreviousDir(const std::wstring& runtimeRoot);
 std::wstring CrashLaunchMarkerPath(const std::wstring& runtimeRoot);
+
+std::wstring LaunchSuspendedMarkerPath(const std::wstring& runtimeRoot);
+
 std::wstring CrashReportsDir(const std::wstring& runtimeRoot);
 std::wstring CrashTimestampForFileName();
 

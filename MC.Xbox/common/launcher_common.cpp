@@ -398,6 +398,10 @@ std::wstring CrashLaunchMarkerPath(const std::wstring& runtimeRoot) {
     return AppStateDir(runtimeRoot) + L"\\minecraft_launch_active.txt";
 }
 
+std::wstring LaunchSuspendedMarkerPath(const std::wstring& runtimeRoot) {
+    return AppStateDir(runtimeRoot) + L"\\minecraft_launch_suspended.txt";
+}
+
 std::wstring CrashReportsDir(const std::wstring& runtimeRoot) {
     return runtimeRoot + L"\\crash-reports";
 }

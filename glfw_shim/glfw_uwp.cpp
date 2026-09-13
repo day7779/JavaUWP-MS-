@@ -23,6 +23,7 @@
 #include <winrt/Windows.UI.Text.Core.h>
 #include <winrt/Windows.UI.ViewManagement.h>
 #include <algorithm>
+#include <atomic>
 #include <climits>
 #include <mutex>
 #include <string>
@@ -341,6 +342,13 @@ static int g_menu_window_height = 540;
 static float g_content_scale_x = 1.0f;
 static float g_content_scale_y = 1.0f;
 static int g_swap_log_count = 0;
+
+static std::atomic<unsigned long long> g_presented_frames{ 0 };
+
+extern "C" __declspec(dllexport) unsigned long long BanditShimPresentedFrames(void) {
+    return g_presented_frames.load(std::memory_order_relaxed);
+}
+
 static int g_poll_log_count = 0;
 static int g_proc_log_count = 0;
 static int g_wait_log_count = 0;
@@ -3936,12 +3944,14 @@ extern "C" __declspec(dllexport) void glfwSwapBuffers(GLFWwindow*) {
         bandit_cursor::Draw();
     }
     if (wglb::Active()) {
-        wglb::Swap();
+        if (wglb::Swap()) g_presented_frames.fetch_add(1, std::memory_order_relaxed);
         return;
     }
     if (!p_eglSwapBuffers || g_eglDisplay == EGL_NO_DISPLAY || g_eglSurface == EGL_NO_SURFACE) return;
     if (!p_eglSwapBuffers(g_eglDisplay, g_eglSurface)) {
         ReportEglError("eglSwapBuffers");
+    } else {
+        g_presented_frames.fetch_add(1, std::memory_order_relaxed);
     }
 }
 extern "C" __declspec(dllexport) void glfwSwapInterval(int i) {

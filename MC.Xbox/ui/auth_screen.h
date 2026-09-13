@@ -315,7 +315,8 @@ public:
                         state.isError ? danger.Get() : muted.Get());
                 }
 
-                const float bodyTop = installBtn.bottom + 42.0f;
+                const float bodyTop = CompatBannerBottom(state, left, right, installBtn.bottom,
+                    panel.Get(), danger.Get(), muted.Get()) + 16.0f;
                 const D2D1_RECT_F bodyRect = D2D1::RectF(left, bodyTop, right, frame.bottom - 30.0f);
                 FillRound(bodyRect, surfaceFill.Get(), 16.0f);
                 StrokeRound(bodyRect, softEdge.Get(), 16.0f, 1.0f);
@@ -729,23 +730,168 @@ public:
             return;
         }
 
+        if (state.showSettings) {
+            const float left = frame.left + 54.0f;
+            const float right = frame.right - 54.0f;
+            const float top = frame.top + 58.0f;
+
+            const D2D1_RECT_F back = DrawBackChip(left, top + 6.0f, surfaceFill.Get(), softEdge.Get(), muted.Get());
+            DrawText(L"Settings", titleFormat_.Get(),
+                D2D1::RectF(back.right + 16.0f, top, right, top + 58.0f), white.Get());
+
+            const float rowH = 84.0f;
+            float rowY = top + 96.0f;
+
+            {
+                const D2D1_RECT_F row = D2D1::RectF(left, rowY, right, rowY + rowH);
+                const bool sel = state.settingsSelected == 0;
+                if (sel) GlowSelect(row, 12.0f);
+                FillRound(row, sel ? accentSoft.Get() : surfaceFill.Get(), 12.0f);
+                StrokeRound(row, sel ? accent.Get() : softEdge.Get(), 12.0f, sel ? 3.0f : 1.0f);
+                DrawText(L"Send crash reports and usage stats", bodyMid_.Get(),
+                    D2D1::RectF(row.left + 22.0f, row.top + 10.0f, right - 160.0f, row.top + 44.0f),
+                    sel ? accent.Get() : white.Get());
+                DrawText(
+                    L"Crash reports and basic launch counts use the same setting.",
+                    smallFormat_.Get(),
+                    D2D1::RectF(row.left + 22.0f, row.top + 44.0f, right - 160.0f, row.bottom - 8.0f),
+                    muted.Get());
+
+                const D2D1_RECT_F pill = D2D1::RectF(right - 132.0f, row.top + 22.0f, right - 22.0f, row.bottom - 22.0f);
+                FillRound(pill, state.settingsReportingOn ? accent.Get() : panel.Get(), 10.0f);
+                StrokeRound(pill, state.settingsReportingOn ? accent.Get() : softEdge.Get(), 10.0f, 1.5f);
+                DrawText(state.settingsReportingOn ? L"On" : L"Off", bodyMid_.Get(), pill,
+                    state.settingsReportingOn ? black.Get() : muted.Get());
+
+                RegisterHit(launchhit::kSettingsRowBase + 0, row);
+                rowY = row.bottom + 18.0f;
+            }
+
+            {
+                const D2D1_RECT_F row = D2D1::RectF(left, rowY, right, rowY + rowH);
+                const bool sel = state.settingsSelected == 1;
+                if (sel) GlowSelect(row, 12.0f);
+                FillRound(row, sel ? accentSoft.Get() : surfaceFill.Get(), 12.0f);
+                StrokeRound(row, sel ? accent.Get() : softEdge.Get(), 12.0f, sel ? 3.0f : 1.0f);
+                DrawText(L"Reset the reporting id", bodyMid_.Get(),
+                    D2D1::RectF(row.left + 22.0f, row.top + 10.0f, right - 22.0f, row.top + 44.0f),
+                    sel ? accent.Get() : white.Get());
+                DrawText(state.settingsInstallId.c_str(), smallFormat_.Get(),
+                    D2D1::RectF(row.left + 22.0f, row.top + 44.0f, right - 22.0f, row.bottom - 8.0f),
+                    muted.Get());
+                RegisterHit(launchhit::kSettingsRowBase + 1, row);
+                rowY = row.bottom + 18.0f;
+            }
+
+            DrawText(
+                state.settingsConfigured
+                    ? L"Reports use a random id and include launcher and Minecraft versions, loader details, launch stage, memory totals and a mod list hash. Mod jar names and project ids can be sent when a crash needs them. A crash trace can include exception text and Java class names. The launcher does not add your account, gamertag, worlds or access token. Common user and app storage paths are scrubbed. The id stays the same until it is reset."
+                    : L"No reporting server is configured on this install, so nothing can be sent either way.",
+                smallFormat_.Get(), D2D1::RectF(left, rowY + 6.0f, right, rowY + 110.0f), muted.Get());
+
+            if (!state.settingsNote.empty()) {
+                DrawText(state.settingsNote.c_str(), smallFormat_.Get(),
+                    D2D1::RectF(left, frame.bottom - 92.0f, right, frame.bottom - 56.0f), accent.Get());
+            }
+            DrawText(L"Press B or select Back to return to the launcher.", smallFormat_.Get(),
+                D2D1::RectF(left, frame.bottom - 50.0f, right, frame.bottom - 18.0f), muted.Get());
+
+            finishDraw();
+            return;
+        }
+
+        if (state.showCrashScreen) {
+            const float left = frame.left + 54.0f;
+            const float right = frame.right - 54.0f;
+            const float top = frame.top + 48.0f;
+
+            DrawIcon(L"\uE7BA", D2D1::RectF(left, top, left + 40.0f, top + 48.0f), danger.Get(), true);
+            DrawText(state.crashHeadline.c_str(), titleFormat_.Get(),
+                D2D1::RectF(left + 52.0f, top, right, top + 56.0f), white.Get());
+
+            float y = top + 74.0f;
+            if (!state.crashSuspectLine.empty()) {
+                int lines = 1;
+                for (const wchar_t ch : state.crashSuspectLine) {
+                    if (ch == L'\n') ++lines;
+                }
+                const float boxH = 24.0f + lines * 40.0f;
+                const D2D1_RECT_F box = D2D1::RectF(left, y, right, y + boxH);
+                FillRound(box, surfaceFill.Get(), 12.0f);
+                StrokeRound(box, softEdge.Get(), 12.0f, 1.0f);
+                DrawText(state.crashSuspectLine.c_str(), bodyMid_.Get(),
+                    D2D1::RectF(box.left + 20.0f, box.top + 8.0f, box.right - 20.0f, box.bottom - 8.0f),
+                    white.Get());
+                y = box.bottom + 18.0f;
+            }
+
+            if (state.crashAskConsent) {
+                DrawText(L"Send this crash report", bodyMid_.Get(),
+                    D2D1::RectF(left, y, right, y + 30.0f), accent.Get());
+                DrawText(
+                    L"Reporting is off. Send this crash once, turn reporting on, or keep it off. The preview includes the crash summary and trace that may be sent. The launcher does not add your account, gamertag or access token. Common user and app storage paths are scrubbed.",
+                    smallFormat_.Get(), D2D1::RectF(left, y + 32.0f, right, y + 96.0f), muted.Get());
+                y += 104.0f;
+            }
+
+            const float panelBottom = frame.bottom - 120.0f;
+            if (state.crashAskConsent || state.crashDetailsOpen) {
+                const D2D1_RECT_F box = D2D1::RectF(left, y, right, panelBottom);
+                FillRound(box, black.Get(), 12.0f);
+                StrokeRound(box, softEdge.Get(), 12.0f, 1.0f);
+                const D2D1_RECT_F textRect = D2D1::RectF(
+                    box.left + 18.0f, box.top + 14.0f - state.crashDetailScroll * 22.0f,
+                    box.right - 18.0f, box.bottom + 4096.0f);
+                d2dContext_->PushAxisAlignedClip(box, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+                const std::wstring& body = state.crashDetailsOpen
+                    ? state.crashTrace
+                    : state.crashConsentPayload;
+                DrawText(body.c_str(), smallFormat_.Get(), textRect, muted.Get());
+                d2dContext_->PopAxisAlignedClip();
+            }
+
+            const float btnH = 58.0f;
+            const float btnY = frame.bottom - 96.0f;
+            const float btnW = (right - left - 36.0f) / 3.0f;
+            for (int i = 0; i < state.crashButtonCount && i < 3; ++i) {
+                const float x = left + i * (btnW + 18.0f);
+                const D2D1_RECT_F button = D2D1::RectF(x, btnY, x + btnW, btnY + btnH);
+                const bool sel = i == state.crashSelected;
+                if (sel) GlowSelect(button, 12.0f);
+                FillRound(button, sel ? accentSoft.Get() : surfaceFill.Get(), 12.0f);
+                StrokeRound(button, sel ? accent.Get() : softEdge.Get(), 12.0f, sel ? 3.0f : 1.0f);
+                DrawText(CrashButtonLabel(state, i), bodyMid_.Get(),
+                    D2D1::RectF(button.left + 14.0f, button.top, button.right - 10.0f, button.bottom),
+                    sel ? accent.Get() : white.Get());
+                RegisterHit(launchhit::kCrashButtonBase + i, button);
+            }
+
+            if (!state.crashFootnote.empty()) {
+                DrawText(state.crashFootnote.c_str(), smallFormat_.Get(),
+                    D2D1::RectF(left, frame.bottom - 34.0f, right, frame.bottom - 6.0f), muted.Get());
+            }
+
+            finishDraw();
+            return;
+        }
+
         if (state.showMainMenu) {
             const float left = frame.left + 36.0f;
             const float menuRight = frame.left + (frame.right - frame.left) * 0.34f;
             const float previewLeft = menuRight + 34.0f;
             const float previewRight = frame.right - 36.0f;
             const float top = frame.top + 34.0f;
-            const float buttonH = 62.0f;
-            const float buttonGap = 24.0f;
-            const wchar_t* labels[] = { L"Play", L"Mods", L"Remote Files", L"Repair downloads", L"Sign out" };
+            const float buttonH = 56.0f;
+            const float buttonGap = 14.0f;
+            const wchar_t* labels[] = { L"Play", L"Mods", L"Remote Files", L"Settings", L"Repair downloads", L"Sign out" };
 
             DrawText(title.c_str(), titleFormat_.Get(), D2D1::RectF(left, top, menuRight, top + 48.0f), white.Get());
 
-            const wchar_t* menuIcons[] = { L"\uE768", L"\uE74C", L"\uE838", L"\uE72C", L"\uE7E8" };
-            for (int i = 0; i < 5; ++i) {
+            const wchar_t* menuIcons[] = { L"\uE768", L"\uE74C", L"\uE838", L"\uE713", L"\uE72C", L"\uE7E8" };
+            for (int i = 0; i < kMainMenuItems; ++i) {
                 const float y = top + 76.0f + i * (buttonH + buttonGap);
                 const D2D1_RECT_F button = D2D1::RectF(left, y, menuRight, y + buttonH);
-                if (i < 5) mainMenuRects_[i] = button;
+                mainMenuRects_[i] = button;
                 const bool sel = i == state.selectedMenuIndex;
                 if (sel) GlowSelect(button, 14.0f);
                 FillRound(button, sel ? accentSoft.Get() : surfaceFill.Get(), 14.0f);
@@ -754,7 +900,7 @@ public:
                 const D2D1_RECT_F textRect = D2D1::RectF(button.left + 56.0f, button.top, button.right - 12.0f, button.bottom);
                 DrawText(labels[i], bodyMid_.Get(), textRect, sel ? accent.Get() : white.Get());
             }
-            mainMenuRectCount_ = 5;
+            mainMenuRectCount_ = kMainMenuItems;
 
             if (!state.status.empty()) {
                 const D2D1_RECT_F statusRect = D2D1::RectF(left, frame.bottom - 88.0f, menuRight, frame.bottom - 28.0f);
@@ -910,6 +1056,20 @@ public:
     }
 
 private:
+    static const wchar_t* CrashButtonLabel(const AuthUiState& state, int index) {
+        if (state.crashAskConsent) {
+            switch (index) {
+                case 0: return L"Send once";
+                case 1: return L"Always send";
+                case 2: return L"Never send";
+                default: return L"";
+            }
+        }
+        if (index == 0) return state.crashDetailsOpen ? L"Hide details" : L"View details";
+        if (index == 1) return L"Dismiss";
+        return L"";
+    }
+
     ComPtr<ICoreWindow> window_;
     ComPtr<ID3D11Device> d3dDevice_;
     ComPtr<ID3D11DeviceContext> d3dContext_;
@@ -940,7 +1100,7 @@ private:
     float cursorX_ = 0.0f;
     float cursorY_ = 0.0f;
     bool cursorVisible_ = false;
-    D2D1_RECT_F mainMenuRects_[5] = {};
+    D2D1_RECT_F mainMenuRects_[kMainMenuItems] = {};
     int mainMenuRectCount_ = 0;
     ComPtr<ID2D1Device> d2dDevice_;
     ComPtr<ID2D1DeviceContext> d2dContext_;
@@ -1170,6 +1330,27 @@ private:
         DrawIcon(L"\uE72B", chip, glyph);
         RegisterHit(launchhit::kBack, chip);
         return chip;
+    }
+
+    float CompatBannerBottom(
+        const AuthUiState& state,
+        float left,
+        float right,
+        float above,
+        ID2D1Brush* fill,
+        ID2D1Brush* warn,
+        ID2D1Brush* body) {
+        if (!state.modsCompatWarn) return above + 26.0f;
+
+        const D2D1_RECT_F rect = D2D1::RectF(left, above + 36.0f, right, above + 36.0f + 78.0f);
+        FillRound(rect, fill, 12.0f);
+        StrokeRound(rect, warn, 12.0f, 2.0f);
+        DrawIcon(L"\uE7BA", D2D1::RectF(rect.left + 16.0f, rect.top, rect.left + 48.0f, rect.bottom), warn);
+        DrawText(state.modsCompatAcked ? L"Install it anyway" : L"Known not to work on this console",
+            bodyMid_.Get(), D2D1::RectF(rect.left + 58.0f, rect.top + 8.0f, right - 14.0f, rect.top + 38.0f), warn);
+        DrawText(state.modsCompatNote.c_str(), smallFormat_.Get(),
+            D2D1::RectF(rect.left + 58.0f, rect.top + 38.0f, right - 14.0f, rect.bottom - 6.0f), body);
+        return rect.bottom;
     }
 
     void GlowSelect(D2D1_RECT_F r, float radius) {
