@@ -9,6 +9,7 @@ EXPORTS
     banditKeyboardGetSelectionStart
     banditKeyboardGetTextLength
     banditKeyboardUpdate
+    glfwAttachWin32Window
     glfwCreateCursor
     glfwCreateStandardCursor
     glfwCreateWindow

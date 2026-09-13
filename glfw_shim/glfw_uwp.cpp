@@ -4095,6 +4095,11 @@ extern "C" __declspec(dllexport) int  glfwGetGamepadState(int jid, GLFWgamepadst
 }
 
 extern "C" __declspec(dllexport) HWND  glfwGetWin32Window(GLFWwindow*) { return NULL; }
+
+// lwjgl's GLFWNativeWin32 clinit resolves every function in the class, so one missing export
+// kills the whole class for any mod that touches it. there is no real hwnd to attach on uwp
+extern "C" __declspec(dllexport) GLFWwindow* glfwAttachWin32Window(HWND, GLFWwindow*) { return NULL; }
+
 extern "C" __declspec(dllexport) void* glfwGetWGLContext(GLFWwindow*) { return NULL; }
 
 typedef struct { void* allocate; void* reallocate; void* deallocate; void* user; } GLFWallocator;
