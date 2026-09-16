@@ -145,8 +145,8 @@ jobs:
   publish:
     name: Publish relay assets
     runs-on: ubuntu-latest
-  # experimental branches build but must not clobber the nightly release
-  if: github.ref == 'refs/heads/main'
+    # experimental branches build but must not clobber the nightly release
+    if: github.ref == 'refs/heads/main'
     needs:
       - windows
       - android
