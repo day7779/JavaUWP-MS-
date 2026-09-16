@@ -59,9 +59,6 @@ jobs:
         with:
           gradle-version: "8.14.3"
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
       - name: Install Android build packages
         shell: bash
         run: |
