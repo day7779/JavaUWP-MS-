@@ -183,8 +183,13 @@ The mouse relay page listens on port 6090 on every network interface with no aut
 and forwards pointer input to the launcher. It carries cursor movement and button presses, not
 files and not account data. Anyone on your network can open it and move your cursor.
 
-The companion relay apps for Windows, Android and iOS send pointer data over UDP on the local
-network. They do not touch your account.
+The Bandit Relay app for Windows, Android and iOS sends pointer data over UDP on the local
+network, and, when you switch the mic on, your microphone audio as uncompressed PCM. The
+console's audio helper sends game audio back to the app the same way while the app asks for it.
+None of it is encrypted, so treat it like any other traffic on your home network. To find the
+console the app sends a short `ping` to the local network's broadcast address and to each
+address in the local range on the relay port; the launcher is the only thing that answers, and
+the app never contacts anything outside your network for this. It does not touch your account.
 
 Do not expose either port to the internet.
 

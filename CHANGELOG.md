@@ -2,6 +2,34 @@
 
 Notable changes to Bandit Launcher. Nightly packages are numbered by build revision rather than by release, so entries here are dated.
 
+## 2026-09-16
+
+### Added
+
+**The companion app is now Bandit Relay and carries the microphone.** The mic relay used to be a separate Python script that had to be installed with pip and pointed at the console by hand, and it listed every audio endpoint on the machine when you asked which device to use. It now lives inside the same app as the mouse relay on Windows, Android and iOS. When the app opens it asks whether you want the mouse, the mic, or both, remembers the answer, and lets you change it from the menu. The mic panel shows a ring that moves with your voice while you talk and a crossed out ring while muted, and muting stops the stream instead of sending silence.
+
+**The mic toggle is out of the way of game clicks.** While the mouse relay is live the app captures the mouse, so nothing on screen may be clickable. On a PC the mic is toggled with `F6` or from the `Esc` menu. On a phone it is a pad in the top right corner that has to be held for half a second; a tap only shows a hint. In mic only mode nothing captures the mouse and the ring itself is the button.
+
+**Game audio can be heard on the relay device.** The console's audio helper already existed and had a Python receiver. The app now subscribes to it with `F7` or from the menu and plays the stream through the device's default output.
+
+**Microphone selection is a short list.** Only recording devices are shown, starting with the system default, and the choice is remembered by name. If the remembered device is unplugged the app falls back to the default and says so.
+
+### Changed
+
+**No more typing the Xbox IP.** The app opens on a search screen instead of an address field. It tries the last known address first, then asks the network and sweeps the local range for the launcher's reply on the relay port, and saves whatever answers. If the console stops answering mid session the app releases any held buttons, scans again and swaps to the new address without leaving the relay screen. Manual entry is still available from the search screen and the menu.
+
+**The relay moved to fixed, unusual ports.** Mouse input is UDP `42731`, status `42732`, microphone `42733` and game audio `42734`, replacing `7331`, `7332`, `7340` and `7341`. The console and the app must both be on this build; an old app will not find a new console and the other way round. The browser touchpad on `6090` is unchanged and forwards to the new mouse port.
+
+**The console reply now says whether it has the mic receiver.** The mode screen greys out the mic options when the console build predates it.
+
+**The relay folder, workflow and nightly assets follow the new name.** `tools/mouse-relay/` is now `tools/relay/`, the workflow is `relay-nightly.yml` and it publishes to the `relay-nightly` release as `BanditRelay-*`. The Android and iOS package identifiers are unchanged so existing installs update in place.
+
+**The package version base moved to 1.0.1.** Local builds stamp `1.0.1.x`, which is above the last published nightly, so a console that already has a nightly installed accepts the new package.
+
+### Removed
+
+**The Python mic and audio relay tools are gone**, along with their setup notes. Everything they did is in the app.
+
 ## 2026-09-04
 
 ### Security

@@ -115,7 +115,7 @@ Other catalog entries (additional Forge versions, older vanilla targets, and fut
 
 - Custom GLFW shim for UWP windowing, input, gamepad state, and EGL.
 - Mesa based graphics path for Xbox Series consoles.
-- Optional mouse relay: use a phone or PC as a mouse over the local network, in the launcher menus and in game.
+- Optional Bandit Relay: use a phone or PC as a mouse and a microphone over the local network, in the launcher menus and in game, and hear the game on the same device.
 - GameInput based controller support through the GLFW shim.
 - Bundled Bandit controller layer for every supported Fabric target from `1.16.5` through `1.21.11`, `1.20.1` Forge, and `1.21.1` NeoForge.
 - Shared controller settings at `config/bandit-controller.properties` (deadzones, look speed, toggle crouch/sprint).
@@ -297,7 +297,7 @@ To preview or apply cleanup:
 | `scripts/` | Setup, cleanup, asset, patch, manifest, and build helpers. |
 | `config/` | Launch target catalog used by the launcher and build. |
 | `mesa-runtime/` | Mesa UWP runtime DLLs used by local builds. |
-| `tools/mouse-relay/` | Bandit Mouse Relay companion apps (Windows and Android) that send mouse input to the console over UDP. |
+| `tools/relay/` | Bandit Relay companion app (Windows, Android and iOS) that finds the console and sends mouse and microphone input to it over UDP. |
 | `build.ps1` | Main APPX build script. |
 | `docs/` | Build, architecture, patching, and legal notes. |
 

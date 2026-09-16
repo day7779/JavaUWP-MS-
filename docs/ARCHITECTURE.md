@@ -156,9 +156,15 @@ To add another Forge target:
 3. Ensure `build.ps1` generates the matching manifest and any per target controller mod jar.
 4. Confirm dispatch in `launch/loaders/loader.cpp` covers the new loader version.
 
-## Mouse Relay
+## Relay
 
-Xbox UWP does not expose a real mouse, so mouse input comes from an optional relay. `mouse_support.dll` (built from `mouse_support/`) is the single mouse source: it owns the UDP listener and exposes frames through a small C API. The GLFW shim links it for in game mouse input, and the launcher loads it through `ui/launcher_mouse` to drive the cursor in menus and the mod browser. Input can come from the native Bandit Mouse Relay app in `tools/mouse-relay/` (Windows and Android, UDP `7331`) or from `net/web_relay_server`, which serves a browser touchpad on port `6090` so any phone or PC can relay without installing an app.
+Xbox UWP does not expose a real mouse, so mouse input comes from an optional relay. `mouse_support.dll` (built from `mouse_support/`) is the single mouse source: it owns the UDP listener and exposes frames through a small C API. The GLFW shim links it for in game mouse input, and the launcher loads it through `ui/launcher_mouse` to drive the cursor in menus and the mod browser. Input can come from the native Bandit Relay app in `tools/relay/` (Windows, Android and iOS, UDP `42731`) or from `net/web_relay_server`, which serves a browser touchpad on port `6090` so any phone or PC can relay without installing an app. The listener answers `ping` with a `javauwp_glfw_mouse:ready` line, which is what the app uses to find the console on the network without a typed address, and that line carries `mic=1` so the app knows the mic receiver is available.
+
+## Mic Relay
+
+Xbox UWP has no usable capture device for the in game JVM: it runs headless with a patched `java.desktop`, and the native `javax.sound.sampled` providers do not load in the sandbox, so Simple Voice Chat sees an empty microphone list. `mic_relay/` builds `relay-mic.jar`, a pure Java `javax.sound.sampled` service provider (a `MixerProvider` exposing one virtual `TargetDataLine`) with no driver and no native code. `launch/minecraft_launch` adds the jar to the Fabric game classpath so the JVM `AudioSystem` enumerates it and Simple Voice Chat can select `Bandit Relay Microphone`. Forge and NeoForge cannot see the app classpath from their module layer, so those targets get the same provider classes as a bundled `lowcodefml` mod (`bandit_mic_relay`) placed in `runtime/version-mods/<target-id>/` and synced into the profile `mods/` folder at launch. Audio arrives as UDP on `42733` from the Bandit Relay app in `tools/relay/` (a phone or PC), the same shape as the mouse relay. Format is 48 kHz mono signed 16-bit; the line blocks briefly and fills silence on underrun so voice chat never stalls.
+
+The reverse direction is the audio relay: `audio_relay/` builds `audio_relay.exe`, a WASAPI loopback helper packaged with the launcher and started by `launch/minecraft_launch` at game launch (kill-on-close job object). The Bandit Relay app subscribes by sending `BMAS` keepalives to UDP `42734` and receives the console's game audio as s16le packets, which it plays on the phone or PC. The console needs no audio configuration.
 
 ## Build Time vs Runtime Configuration
 

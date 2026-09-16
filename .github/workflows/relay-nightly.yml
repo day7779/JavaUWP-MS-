@@ -1,24 +1,24 @@
-name: Mouse relay nightly
+name: Relay nightly
 
 on:
   push:
     branches:
       - main
     paths:
-      - ".github/workflows/mouse-relay-nightly.yml"
-      - "tools/mouse-relay/**"
+      - ".github/workflows/relay-nightly.yml"
+      - "tools/relay/**"
   workflow_dispatch:
 
 concurrency:
-  group: mouse-relay-nightly
+  group: relay-nightly
   cancel-in-progress: true
 
 permissions:
   contents: write
 
 env:
-  MOUSE_RELAY_NIGHTLY_TAG: mouse-relay-nightly
-  MOUSE_RELAY_NIGHTLY_TITLE: Mouse Relay Nightly
+  RELAY_NIGHTLY_TAG: relay-nightly
+  RELAY_NIGHTLY_TITLE: Bandit Relay Nightly
 
 jobs:
   windows:
@@ -32,15 +32,15 @@ jobs:
 
       - name: Package Windows relay
         shell: powershell
-        run: .\tools\mouse-relay\scripts\package-windows.ps1
+        run: .\tools\relay\scripts\package-windows.ps1
 
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
         with:
-          name: BanditMouseRelay-nightly-win-x64
+          name: BanditRelay-nightly-win-x64
           path: |
-            dist/mouse-relay/BanditMouseRelay-nightly-win-x64.zip
-            dist/mouse-relay/BanditMouseRelay-nightly-win-x64.sha256
+            dist/relay/BanditRelay-nightly-win-x64.zip
+            dist/relay/BanditRelay-nightly-win-x64.sha256
           if-no-files-found: error
 
   android:
@@ -75,25 +75,25 @@ jobs:
           sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;28.2.13676358" "cmake;3.22.1"
 
       - name: Build Android APK
-        working-directory: tools/mouse-relay/android
+        working-directory: tools/relay/android
         shell: bash
         run: gradle --no-daemon :app:assembleDebug
 
       - name: Stage Android artifact
         shell: bash
         run: |
-          mkdir -p dist/mouse-relay
-          cp tools/mouse-relay/android/app/build/outputs/apk/debug/app-debug.apk dist/mouse-relay/BanditMouseRelay-nightly-android-debug.apk
-          cd dist/mouse-relay
-          sha256sum BanditMouseRelay-nightly-android-debug.apk > BanditMouseRelay-nightly-android-debug.sha256
+          mkdir -p dist/relay
+          cp tools/relay/android/app/build/outputs/apk/debug/app-debug.apk dist/relay/BanditRelay-nightly-android-debug.apk
+          cd dist/relay
+          sha256sum BanditRelay-nightly-android-debug.apk > BanditRelay-nightly-android-debug.sha256
 
       - name: Upload Android artifact
         uses: actions/upload-artifact@v4
         with:
-          name: BanditMouseRelay-nightly-android-debug
+          name: BanditRelay-nightly-android-debug
           path: |
-            dist/mouse-relay/BanditMouseRelay-nightly-android-debug.apk
-            dist/mouse-relay/BanditMouseRelay-nightly-android-debug.sha256
+            dist/relay/BanditRelay-nightly-android-debug.apk
+            dist/relay/BanditRelay-nightly-android-debug.sha256
           if-no-files-found: error
 
   ios:
@@ -108,7 +108,7 @@ jobs:
       - name: Configure iOS project
         shell: bash
         run: |
-          cmake -S tools/mouse-relay -B build/ios -G Xcode \
+          cmake -S tools/relay -B build/ios -G Xcode \
             -DCMAKE_SYSTEM_NAME=iOS \
             -DCMAKE_OSX_ARCHITECTURES=arm64 \
             -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0
@@ -121,9 +121,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          app="$(find build/ios -maxdepth 3 -name 'BanditMouseRelay.app' -type d | head -n 1)"
+          app="$(find build/ios -maxdepth 3 -name 'BanditRelay.app' -type d | head -n 1)"
           if [ -z "$app" ]; then
-            echo "no BanditMouseRelay.app produced"
+            echo "no BanditRelay.app produced"
             find build/ios -maxdepth 3 -name '*.app' -o -maxdepth 3 -name 'Release*' -type d
             exit 1
           fi
@@ -132,22 +132,22 @@ jobs:
           rm -rf build/ipa
           mkdir -p build/ipa/Payload
           cp -R "$app" build/ipa/Payload/
-          mkdir -p dist/mouse-relay
-          ( cd build/ipa && zip -qry "$GITHUB_WORKSPACE/dist/mouse-relay/BanditMouseRelay-nightly-ios.ipa" Payload )
-          cd dist/mouse-relay
-          shasum -a 256 BanditMouseRelay-nightly-ios.ipa > BanditMouseRelay-nightly-ios.sha256
+          mkdir -p dist/relay
+          ( cd build/ipa && zip -qry "$GITHUB_WORKSPACE/dist/relay/BanditRelay-nightly-ios.ipa" Payload )
+          cd dist/relay
+          shasum -a 256 BanditRelay-nightly-ios.ipa > BanditRelay-nightly-ios.sha256
 
       - name: Upload iOS artifact
         uses: actions/upload-artifact@v4
         with:
-          name: BanditMouseRelay-nightly-ios
+          name: BanditRelay-nightly-ios
           path: |
-            dist/mouse-relay/BanditMouseRelay-nightly-ios.ipa
-            dist/mouse-relay/BanditMouseRelay-nightly-ios.sha256
+            dist/relay/BanditRelay-nightly-ios.ipa
+            dist/relay/BanditRelay-nightly-ios.sha256
           if-no-files-found: error
 
   publish:
-    name: Publish mouse relay assets
+    name: Publish relay assets
     runs-on: ubuntu-latest
     # experimental branches build but must not clobber the nightly release
     if: github.ref == 'refs/heads/main'
@@ -168,28 +168,28 @@ jobs:
         with:
           path: dist
 
-      - name: Move mouse relay nightly tag
+      - name: Move relay nightly tag
         shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -f "$MOUSE_RELAY_NIGHTLY_TAG" "$GITHUB_SHA"
-          git push --force origin "refs/tags/$MOUSE_RELAY_NIGHTLY_TAG"
+          git tag -f "$RELAY_NIGHTLY_TAG" "$GITHUB_SHA"
+          git push --force origin "refs/tags/$RELAY_NIGHTLY_TAG"
 
-      - name: Publish to mouse relay nightly release
+      - name: Publish to relay nightly release
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if ! gh release view "$MOUSE_RELAY_NIGHTLY_TAG" >/dev/null 2>&1; then
-            gh release create "$MOUSE_RELAY_NIGHTLY_TAG" --target "$GITHUB_SHA" --title "$MOUSE_RELAY_NIGHTLY_TITLE" --prerelease --notes "Automated nightly mouse relay builds."
+          if ! gh release view "$RELAY_NIGHTLY_TAG" >/dev/null 2>&1; then
+            gh release create "$RELAY_NIGHTLY_TAG" --target "$GITHUB_SHA" --title "$RELAY_NIGHTLY_TITLE" --prerelease --notes "Automated nightly relay builds."
           fi
 
-          gh release upload "$MOUSE_RELAY_NIGHTLY_TAG" \
-            dist/BanditMouseRelay-nightly-win-x64/BanditMouseRelay-nightly-win-x64.zip \
-            dist/BanditMouseRelay-nightly-win-x64/BanditMouseRelay-nightly-win-x64.sha256 \
-            dist/BanditMouseRelay-nightly-android-debug/BanditMouseRelay-nightly-android-debug.apk \
-            dist/BanditMouseRelay-nightly-android-debug/BanditMouseRelay-nightly-android-debug.sha256 \
-            dist/BanditMouseRelay-nightly-ios/BanditMouseRelay-nightly-ios.ipa \
-            dist/BanditMouseRelay-nightly-ios/BanditMouseRelay-nightly-ios.sha256 \
+          gh release upload "$RELAY_NIGHTLY_TAG" \
+            dist/BanditRelay-nightly-win-x64/BanditRelay-nightly-win-x64.zip \
+            dist/BanditRelay-nightly-win-x64/BanditRelay-nightly-win-x64.sha256 \
+            dist/BanditRelay-nightly-android-debug/BanditRelay-nightly-android-debug.apk \
+            dist/BanditRelay-nightly-android-debug/BanditRelay-nightly-android-debug.sha256 \
+            dist/BanditRelay-nightly-ios/BanditRelay-nightly-ios.ipa \
+            dist/BanditRelay-nightly-ios/BanditRelay-nightly-ios.sha256 \
             --clobber

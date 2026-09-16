@@ -15,8 +15,8 @@
 
 namespace {
 
-const unsigned short kInputPort = 7331;
-const unsigned short kStatusPort = 7332;
+const unsigned short kInputPort = 42731;
+const unsigned short kStatusPort = 42732;
 const unsigned short kOverlayPort = 7333;
 const double kProtocolWidth = 1920.0;
 const double kProtocolHeight = 1080.0;
@@ -239,7 +239,7 @@ DWORD WINAPI ReceiveThreadProc(LPVOID) {
 
         if (strcmp(buf, "hello") == 0 || strcmp(buf, "ping") == 0) {
             char ack[160] = {};
-            sprintf_s(ack, "javauwp_glfw_mouse:ready mode=%d cursor=%.0f,%.0f cursorw=%.0f,%.0f size=%dx%d menu=%dx%d",
+            sprintf_s(ack, "javauwp_glfw_mouse:ready mode=%d cursor=%.0f,%.0f cursorw=%.0f,%.0f size=%dx%d menu=%dx%d mic=1",
                 stableMode,
                 WindowToProtocolX(menuCursorX, windowWidth), WindowToProtocolY(menuCursorY, windowHeight),
                 menuCursorX, menuCursorY,

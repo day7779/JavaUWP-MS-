@@ -407,6 +407,11 @@ Write-Host "=== Building mouse support DLL ==="
 & (Join-Path $root "mouse_support\build_mouse_support.ps1") -OutputDir $mouseSupportBuildDir
 if (-not (Test-Path $mouseSupportDll)) { throw "mouse_support DLL missing after build: $mouseSupportDll" }
 
+$audioRelayBuildDir = Join-Path $buildDir "audio_relay"
+& (Join-Path $root "audio_relay\build_audio_relay.ps1") -OutputDir $audioRelayBuildDir
+$audioRelayExe = Join-Path $audioRelayBuildDir "audio_relay.exe"
+if (-not (Test-Path $audioRelayExe)) { throw "audio_relay exe missing after build: $audioRelayExe" }
+
 Write-Host "=== Building GLFW CoreWindow shim ==="
 & (Join-Path $root "glfw_shim\build_glfw.ps1") -OutputDir $glfwBuildDir -MouseSupportLib $mouseSupportLib -MouseSupportInclude (Join-Path $root "mouse_support")
 if (-not (Test-Path $shimDll)) { throw "GLFW shim DLL missing after build: $shimDll" }
@@ -643,6 +648,7 @@ Write-Host "Copying GLFW shim..."
 Copy-Item $shimDll (Join-Path $pkg "natives\glfw.dll") -Force
 Copy-Item $mouseSupportDll (Join-Path $pkg "mouse_support.dll") -Force
 Copy-Item $mouseSupportDll (Join-Path $pkg "natives\mouse_support.dll") -Force
+Copy-Item $audioRelayExe (Join-Path $pkg "audio_relay.exe") -Force
 
 Write-Host "Copying Mesa runtime..."
 $mesaRuntime = Resolve-MesaRuntimeDir -MesaRuntimeDir $MesaRuntimeDir
@@ -1078,6 +1084,44 @@ function Build-JavaDesktopUwpAwtPatch {
     Write-Host "Java desktop UWP AWT patch: $OutputJar"
 }
 
+function Build-MicRelayJar {
+    param(
+        [Parameter(Mandatory = $true)][string]$JavaHome,
+        [Parameter(Mandatory = $true)][string]$OutputJar,
+        [Parameter(Mandatory = $true)][string]$OutputModJar
+    )
+
+    Write-Host "Building relay microphone jar: $OutputJar"
+    $javacExe = Join-Path $JavaHome "bin\javac.exe"
+    if (-not (Test-Path $javacExe)) { throw "javac.exe not found at $javacExe; relay-mic jar requires a JDK, not a JRE." }
+    $micJarExe = Join-Path $JavaHome "bin\jar.exe"
+    if (-not (Test-Path $micJarExe)) { $micJarExe = $jarExe }
+    $micSrc = Join-Path $root "mic_relay\src\main\java"
+    $micRes = Join-Path $root "mic_relay\src\main\resources"
+    $micWork = Join-Path $buildDir "mic_relay"
+    $micClasses = Join-Path $micWork "classes"
+    Remove-Item -Recurse -Force $micWork -ErrorAction SilentlyContinue
+    New-Item -ItemType Directory -Force -Path $micClasses | Out-Null
+    $micSources = Get-ChildItem -Recurse -Filter *.java $micSrc | ForEach-Object { $_.FullName }
+    & $javacExe --release 17 -d $micClasses $micSources
+    if ($LASTEXITCODE -ne 0) { throw "relay-mic compile failed" }
+    Copy-Item -Recurse -Force (Join-Path $micRes "*") $micClasses
+    Push-Location $micClasses
+    & $micJarExe cf $OutputJar .
+    Pop-Location
+    if ($LASTEXITCODE -ne 0) { throw "relay-mic jar creation failed" }
+    Write-Host "Relay microphone jar: $OutputJar"
+
+    Copy-Item -Force (Join-Path $root "mic_relay\modmeta\mods.toml") (Join-Path $micClasses "META-INF\mods.toml")
+    Copy-Item -Force (Join-Path $root "mic_relay\modmeta\neoforge.mods.toml") (Join-Path $micClasses "META-INF\neoforge.mods.toml")
+    Copy-Item -Force (Join-Path $root "mic_relay\modmeta\pack.mcmeta") (Join-Path $micClasses "pack.mcmeta")
+    Push-Location $micClasses
+    & $micJarExe cf $OutputModJar .
+    Pop-Location
+    if ($LASTEXITCODE -ne 0) { throw "relay-mic mod jar creation failed" }
+    Write-Host "Relay microphone mod jar: $OutputModJar"
+}
+
 function Resolve-SecureJarHandlerJar {
     param([Parameter(Mandatory = $true)][string]$Version)
 
@@ -1156,6 +1200,32 @@ Build-JavaZipfsRealpathPatch -JavaHome $jre21Src -OutputJar (Join-Path $pkg "jav
 Build-JavaDesktopUwpAwtPatch -JavaHome $jreSrc -OutputJar (Join-Path $pkg "java-desktop-uwp-awt.jar") -WorkName "java_desktop_uwp_awt_patch_current"
 Build-JavaDesktopUwpAwtPatch -JavaHome $jre21Src -OutputJar (Join-Path $pkg "java-desktop-uwp-awt-21.jar") -WorkName "java_desktop_uwp_awt_patch_21"
 Build-SecureJarHandlerUwpPatch -JavaHome $jre21Src -Version "3.0.8" -OutputJar (Join-Path $pkg "securejarhandler-uwp-patch.jar")
+$micRelayModJar = Join-Path (Join-Path $buildDir "mic_relay") "bandit_mic_relay-1.0.0.jar"
+Build-MicRelayJar -JavaHome $jre21Src -OutputJar (Join-Path $pkg "relay-mic.jar") -OutputModJar $micRelayModJar
+if (-not $SkipVersionCompat) {
+    $micVersionModsRoot = Join-Path $pkg "runtime\version-mods"
+    foreach ($row in $forgeTargets) {
+        $mcMinor = 0
+        $mcParts = "$($row.minecraftVersion)".Split('.')
+        if ($mcParts.Length -ge 2) { $mcMinor = [int]$mcParts[1] }
+        if ($row.javaRuntime -eq "legacy" -or $mcMinor -lt 19) {
+            Write-Host "Skipping mic relay mod for $($row.minecraftVersion) forge: loader too old for lowcodefml"
+            continue
+        }
+        $targetId = "$($row.minecraftVersion)-forge-$($row.loaderVersion)"
+        $outDir = Join-Path $micVersionModsRoot $targetId
+        New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+        Copy-Item -Force $micRelayModJar (Join-Path $outDir "bandit_mic_relay-1.0.0.jar")
+        Write-Host "Bundled mic relay mod for ${targetId}"
+    }
+    foreach ($row in $neoForgeTargets) {
+        $targetId = "$($row.minecraftVersion)-neoforge-$($row.loaderVersion)"
+        $outDir = Join-Path $micVersionModsRoot $targetId
+        New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+        Copy-Item -Force $micRelayModJar (Join-Path $outDir "bandit_mic_relay-1.0.0.jar")
+        Write-Host "Bundled mic relay mod for ${targetId}"
+    }
+}
 
 Write-Host "Copying UWP tile assets..."
 $appxAssetSource = Join-Path $root "MC.Xbox\Assets\appx"

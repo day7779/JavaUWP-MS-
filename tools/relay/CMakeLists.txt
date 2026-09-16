@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(BanditMouseRelay LANGUAGES CXX)
+project(BanditRelay LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -29,16 +29,16 @@ elseif(IOS)
   )
   FetchContent_MakeAvailable(SDL3)
 
-  add_executable(BanditMouseRelay MACOSX_BUNDLE src/main.cpp)
-  target_compile_definitions(BanditMouseRelay PRIVATE BANDIT_MOUSE_RELAY_TOUCH=1)
-  target_link_libraries(BanditMouseRelay PRIVATE SDL3::SDL3-static)
+  add_executable(BanditRelay MACOSX_BUNDLE src/main.cpp)
+  target_compile_definitions(BanditRelay PRIVATE BANDIT_MOUSE_RELAY_TOUCH=1)
+  target_link_libraries(BanditRelay PRIVATE SDL3::SDL3-static)
 
-  set_target_properties(BanditMouseRelay PROPERTIES
+  set_target_properties(BanditRelay PROPERTIES
     MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/ios/Info.plist"
     MACOSX_BUNDLE_BUNDLE_NAME "Bandit Relay"
     MACOSX_BUNDLE_GUI_IDENTIFIER "dev.bandit.mouserelay"
-    MACOSX_BUNDLE_BUNDLE_VERSION "0.1.0"
-    MACOSX_BUNDLE_SHORT_VERSION_STRING "0.1.0"
+    MACOSX_BUNDLE_BUNDLE_VERSION "0.2.0"
+    MACOSX_BUNDLE_SHORT_VERSION_STRING "0.2.0"
     XCODE_ATTRIBUTE_TARGETED_DEVICE_FAMILY "1,2"
     XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED "NO"
     XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED "NO"
@@ -60,12 +60,12 @@ else()
   )
   FetchContent_MakeAvailable(SDL3)
 
-  add_executable(BanditMouseRelay WIN32 src/main.cpp)
-  target_link_libraries(BanditMouseRelay PRIVATE SDL3::SDL3)
+  add_executable(BanditRelay WIN32 src/main.cpp)
+  target_link_libraries(BanditRelay PRIVATE SDL3::SDL3)
 
   if(WIN32)
-    target_sources(BanditMouseRelay PRIVATE src/app.rc)
-    target_link_libraries(BanditMouseRelay PRIVATE ws2_32 winmm)
+    target_sources(BanditRelay PRIVATE src/app.rc)
+    target_link_libraries(BanditRelay PRIVATE ws2_32 winmm)
   endif()
 endif()
 

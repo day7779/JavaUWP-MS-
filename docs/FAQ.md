@@ -19,7 +19,7 @@ Bandit Launcher requires a valid copy of Minecraft: Java Edition. The launcher d
 If you have Minecraft through Game Pass, you need to create an account on minecraft.net and set a player name.
 
 ## How do I use my mouse?
-On the (nightly page)[https://github.com/veroxsity/JavaUWP/tags], under mouse-relay-nightly, you can install an .exe if you want to use your Windows PC as a mouse, an APK if you want to use an Android, and an IPA if you want to use IPhone (which requires sideloading). You cannot plug your mouse directly into the XBOX, as Microsoft only allows you to use it on the Developer Mode Home.
+On the (nightly page)[https://github.com/veroxsity/JavaUWP/tags], under relay-nightly, you can install an .exe if you want to use your Windows PC as a mouse, an APK if you want to use an Android, and an IPA if you want to use IPhone (which requires sideloading). You cannot plug your mouse directly into the XBOX, as Microsoft only allows you to use it on the Developer Mode Home.
 
 ## Is the mouse relay laggy?
 The mouse relay does not lag unless you have a bad computer or *really* bad wifi. In other words, if it does lag, look into better wifi or a better device to use the relay.
