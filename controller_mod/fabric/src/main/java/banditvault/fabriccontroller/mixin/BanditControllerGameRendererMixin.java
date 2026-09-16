@@ -20,9 +20,4 @@ public abstract class BanditControllerGameRendererMixin {
     private void banditvault$renderControllerLook(float tickDelta, long startTime, boolean tick, CallbackInfo ci) {
         BanditControllerCompat.renderFrame(this.field_4015);
     }
-
-    @Inject(method = "method_3192", at = @At("TAIL"))
-    private void banditvault$renderControllerCursorOverlay(float tickDelta, long startTime, boolean tick, CallbackInfo ci) {
-        BanditControllerCompat.renderCursorOverlay(this.field_4015);
-    }
 }

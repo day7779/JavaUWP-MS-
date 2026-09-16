@@ -10,6 +10,10 @@
 #include "profiles.h"
 #include "qr_code.h"
 
+constexpr int kModsTargetRowsVisible = 10;
+
+constexpr int kMainMenuItems = 6;
+
 struct AuthUiState {
     std::wstring title;
     std::wstring userCode;
@@ -41,11 +45,15 @@ struct AuthUiState {
     bool modsDetailLoading = false;
     int modsDetailScroll = 0;
     unsigned modsDetailReqId = 0;
+    bool modsCompatWarn = false;
+    bool modsCompatAcked = false;
+    std::wstring modsCompatNote;
     std::wstring activeProfileName;
     std::wstring activeProfileId;
     std::vector<LaunchTarget> modsTargets;
     std::wstring modsBrowseTargetId;
     bool modsTargetOpen = false;
+    int modsTargetScroll = 0;
     int modsTargetSel = 0;
     bool modsProfileOpen = false;
     std::wstring modsProfileId;
@@ -65,4 +73,23 @@ struct AuthUiState {
     QrMatrix qr;
     bool showLaunchLog = false;
     std::wstring launchLogText;
+
+    bool showCrashScreen = false;
+    std::wstring crashHeadline;
+    std::wstring crashSuspectLine;
+    std::wstring crashTrace;
+    std::wstring crashConsentPayload;
+    bool crashDetailsOpen = false;
+    int crashDetailScroll = 0;
+    bool crashAskConsent = false;
+    int crashSelected = 0;
+    int crashButtonCount = 0;
+    std::wstring crashFootnote;
+
+    bool showSettings = false;
+    int settingsSelected = 0;
+    bool settingsReportingOn = false;
+    bool settingsConfigured = false;
+    std::wstring settingsInstallId;
+    std::wstring settingsNote;
 };

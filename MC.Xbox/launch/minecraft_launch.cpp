@@ -1,18 +1,21 @@
-﻿#include "minecraft_launch.h"
+#include "minecraft_launch.h"
 
 #include "app_globals.h"
 #include "crash_report.h"
 #include "launch_internal.h"
 #include "loader.h"
 #include "loader_common.h"
+#include "launch_diagnostics.h"
 #include "neoforge.h"
 #include "launcher_common.h"
 #include "mod_defaults.h"
 #include "mods_browser.h"
 #include "profiles.h"
 #include "runtime_manager.h"
+#include "telemetry.h"
 
 #include <jni.h>
+#include <roapi.h>
 #include <io.h>
 #include <fcntl.h>
 #include <share.h>
@@ -58,11 +61,30 @@ static void DestroyEmbeddedJvm(JavaVM*& vm, JNIEnv*& env) {
 
 static constexpr wchar_t kEGLNativeWindowTypeProperty[] = L"EGLNativeWindowTypeProperty";
 
+static unsigned long long ShimPresentedFrames() {
+    using ReaderFn = unsigned long long (*)();
+    static ReaderFn reader = nullptr;
+    // lwjgl loads the shim after startup
+    if (!reader) {
+        HMODULE shim = GetModuleHandleW(L"glfw.dll");
+        if (shim) {
+            reader = reinterpret_cast<ReaderFn>(GetProcAddress(shim, "BanditShimPresentedFrames"));
+        }
+    }
+    return reader ? reader() : 0ull;
+}
+
 static volatile LONG g_logTailerRunning = 0;
 static HANDLE g_logTailerThreads[8] = {};
 static int g_logTailerThreadCount = 0;
 static HANDLE g_redirectedStdoutHandle = INVALID_HANDLE_VALUE;
 static HANDLE g_redirectedStderrHandle = INVALID_HANDLE_VALUE;
+
+static const ULONGLONG kLogTailerFastWindowMs = 120000;
+static const DWORD kLogTailerFastPollMs = 250;
+static const DWORD kLogTailerIdlePollMs = 2000;
+
+static constexpr char kPlayableMarker[] = "banditvault:playable";
 
 struct LogTailerConfig {
     std::wstring path;
@@ -293,6 +315,12 @@ static DWORD WINAPI LogTailerThreadProc(LPVOID param) {
     LARGE_INTEGER offset = {};
     char buffer[4096];
     bool attached = false;
+    // keep enough overlap for a marker split across reads
+    const bool watchPlayable = (label == L"xbox_compat.log");
+    bool playableSent = false;
+    std::string carry;
+    // 5 tailers at 250ms is 20 file opens a second against files the jvm is writing
+    ULONGLONG startedAt = GetTickCount64();
 
     while (InterlockedCompareExchange(&g_logTailerRunning, 1, 1) == 1) {
         HANDLE file = CreateFile2(
@@ -321,13 +349,24 @@ static DWORD WINAPI LogTailerThreadProc(LPVOID param) {
                         break;
                     }
                     offset.QuadPart += bytesRead;
+                    if (watchPlayable && !playableSent) {
+                        carry.append(buffer, bytesRead);
+                        if (carry.find(kPlayableMarker) != std::string::npos) {
+                            playableSent = true;
+                            carry.clear();
+                            telemetry::SendPlayable();
+                        } else if (carry.size() > 1024) {
+                            carry.erase(0, carry.size() - 64);
+                        }
+                    }
                     LogUtf8Chunk(label, buffer, bytesRead);
                 }
             }
             CloseHandle(file);
         }
 
-        Sleep(250);
+        const bool stillStarting = (GetTickCount64() - startedAt) < kLogTailerFastWindowMs;
+        Sleep(stillStarting ? kLogTailerFastPollMs : kLogTailerIdlePollMs);
     }
 
     return 0;
@@ -644,82 +683,10 @@ static bool PreloadJvm(
     if (!*jvmModule) {
         return false;
     }
-	
+
 	loadPackaged(packagedPrefix + L"\\bin\\java.dll", L"java.dll");
 
     WriteLogF(L"JVM DLLs loaded from package runtime %s", packagedPrefix.c_str());
-    return true;
-}
-
-static bool CheckAndLogJavaException(JNIEnv* env, const wchar_t* stage) {
-    if (!env->ExceptionCheck()) return false;
-    WriteLogF(L"Java exception during %s", stage);
-
-    jthrowable throwable = env->ExceptionOccurred();
-    env->ExceptionClear();
-
-    if (!throwable) {
-        WriteLog(L"Java exception object was null after ExceptionOccurred");
-        return true;
-    }
-
-    jclass stringWriterClass = env->FindClass("java/io/StringWriter");
-    jclass printWriterClass = env->FindClass("java/io/PrintWriter");
-    jclass throwableClass = env->FindClass("java/lang/Throwable");
-    if (!stringWriterClass || !printWriterClass || !throwableClass) {
-        WriteLog(L"Unable to load Java exception formatting classes");
-        env->ExceptionClear();
-        env->DeleteLocalRef(throwable);
-        return true;
-    }
-
-    jmethodID stringWriterCtor = env->GetMethodID(stringWriterClass, "<init>", "()V");
-    jmethodID printWriterCtor = env->GetMethodID(printWriterClass, "<init>", "(Ljava/io/Writer;)V");
-    jmethodID printStackTrace = env->GetMethodID(throwableClass, "printStackTrace", "(Ljava/io/PrintWriter;)V");
-    jmethodID toString = env->GetMethodID(stringWriterClass, "toString", "()Ljava/lang/String;");
-    if (!stringWriterCtor || !printWriterCtor || !printStackTrace || !toString || env->ExceptionCheck()) {
-        WriteLog(L"Unable to resolve Java exception formatting methods");
-        env->ExceptionClear();
-        env->DeleteLocalRef(throwable);
-        env->DeleteLocalRef(stringWriterClass);
-        env->DeleteLocalRef(printWriterClass);
-        env->DeleteLocalRef(throwableClass);
-        return true;
-    }
-
-    jobject stringWriter = env->NewObject(stringWriterClass, stringWriterCtor);
-    jobject printWriter = stringWriter ? env->NewObject(printWriterClass, printWriterCtor, stringWriter) : nullptr;
-    if (!stringWriter || !printWriter || env->ExceptionCheck()) {
-        WriteLog(L"Unable to create Java exception formatter");
-        env->ExceptionClear();
-        env->DeleteLocalRef(throwable);
-        env->DeleteLocalRef(stringWriterClass);
-        env->DeleteLocalRef(printWriterClass);
-        env->DeleteLocalRef(throwableClass);
-        return true;
-    }
-
-    env->CallVoidMethod(throwable, printStackTrace, printWriter);
-    jstring trace = static_cast<jstring>(env->CallObjectMethod(stringWriter, toString));
-    if (trace && !env->ExceptionCheck()) {
-        const char* utf8 = env->GetStringUTFChars(trace, nullptr);
-        if (utf8) {
-            const std::wstring wideTrace = a2w(utf8);
-            WriteLogF(L"Java exception stack:\n%s", wideTrace.c_str());
-            env->ReleaseStringUTFChars(trace, utf8);
-        }
-    } else {
-        WriteLog(L"Unable to stringify Java exception stack");
-        env->ExceptionClear();
-    }
-
-    if (trace) env->DeleteLocalRef(trace);
-    env->DeleteLocalRef(printWriter);
-    env->DeleteLocalRef(stringWriter);
-    env->DeleteLocalRef(throwable);
-    env->DeleteLocalRef(stringWriterClass);
-    env->DeleteLocalRef(printWriterClass);
-    env->DeleteLocalRef(throwableClass);
     return true;
 }
 
@@ -902,6 +869,195 @@ done:
     if (threadClass) env->DeleteLocalRef(threadClass);
     if (attached) {
         vm->DetachCurrentThread();
+    }
+}
+
+// not declared for the uwp api family; present in kernel32 on dev mode
+extern "C" {
+WINBASEAPI HANDLE WINAPI CreateJobObjectW(LPSECURITY_ATTRIBUTES lpJobAttributes, LPCWSTR lpName);
+WINBASEAPI BOOL WINAPI AssignProcessToJobObject(HANDLE hJob, HANDLE hProcess);
+WINBASEAPI BOOL WINAPI SetInformationJobObject(HANDLE hJob, JOBOBJECTINFOCLASS JobObjectInformationClass, LPVOID lpJobObjectInformation, DWORD cbJobObjectInformationLength);
+}
+
+namespace
+{
+    HANDLE gAudioRelayJob = nullptr;
+    HANDLE gAudioRelayProcess = nullptr;
+
+    std::wstring JoinAudioRelayPath(
+        const std::wstring& directory)
+    {
+        if (directory.empty())
+            return L"audio_relay.exe";
+
+        const wchar_t last = directory.back();
+
+        if (last == L'\\' || last == L'/')
+            return directory + L"audio_relay.exe";
+
+        return directory + L"\\audio_relay.exe";
+    }
+
+    bool IsAudioRelayFile(const std::wstring& path)
+    {
+        const DWORD attributes = GetFileAttributesW(path.c_str());
+
+        return attributes != INVALID_FILE_ATTRIBUTES &&
+               (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0;
+    }
+}
+
+void StartAudioRelay(
+    const std::wstring& exeDir,
+    const std::wstring& packageDir,
+    const std::wstring& gameDir)
+{
+    if (gAudioRelayProcess != nullptr)
+    {
+        if (WaitForSingleObject(gAudioRelayProcess, 0) ==
+            WAIT_TIMEOUT)
+        {
+            return;
+        }
+
+        CloseHandle(gAudioRelayProcess);
+        gAudioRelayProcess = nullptr;
+    }
+
+    std::wstring relayPath =
+        JoinAudioRelayPath(exeDir);
+
+    if (!IsAudioRelayFile(relayPath))
+        relayPath = JoinAudioRelayPath(packageDir);
+
+    if (!IsAudioRelayFile(relayPath))
+    {
+        WriteLogF(
+            L"Audio relay disabled: audio_relay.exe missing");
+        return;
+    }
+
+    if (gAudioRelayJob == nullptr)
+    {
+        gAudioRelayJob =
+            CreateJobObjectW(nullptr, nullptr);
+
+        if (gAudioRelayJob == nullptr)
+        {
+            WriteLogF(
+                L"Audio relay disabled: CreateJobObjectW failed (%lu)",
+                GetLastError());
+            return;
+        }
+
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+        limits.BasicLimitInformation.LimitFlags =
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+
+        if (!SetInformationJobObject(
+                gAudioRelayJob,
+                JobObjectExtendedLimitInformation,
+                &limits,
+                sizeof(limits)))
+        {
+            const DWORD error = GetLastError();
+            CloseHandle(gAudioRelayJob);
+            gAudioRelayJob = nullptr;
+
+            WriteLogF(
+                L"Audio relay disabled: "
+                L"SetInformationJobObject failed (%lu)",
+                error);
+            return;
+        }
+    }
+
+    std::wstring commandLine =
+        L"\"" + relayPath + L"\"";
+
+    std::vector<wchar_t> mutableCommandLine(
+        commandLine.begin(),
+        commandLine.end());
+    mutableCommandLine.push_back(L'\0');
+
+    STARTUPINFOW startupInfo{};
+    startupInfo.cb = sizeof(startupInfo);
+
+    PROCESS_INFORMATION processInfo{};
+
+    const DWORD creationFlags =
+        CREATE_NO_WINDOW | CREATE_SUSPENDED;
+
+    if (!CreateProcessW(
+            relayPath.c_str(),
+            mutableCommandLine.data(),
+            nullptr,
+            nullptr,
+            FALSE,
+            creationFlags,
+            nullptr,
+            gameDir.empty() ? nullptr : gameDir.c_str(),
+            &startupInfo,
+            &processInfo))
+    {
+        WriteLogF(
+            L"Audio relay disabled: CreateProcessW failed (%lu)",
+            GetLastError());
+        return;
+    }
+
+    if (!AssignProcessToJobObject(
+            gAudioRelayJob,
+            processInfo.hProcess))
+    {
+        const DWORD error = GetLastError();
+
+        TerminateProcess(processInfo.hProcess, error);
+        CloseHandle(processInfo.hThread);
+        CloseHandle(processInfo.hProcess);
+
+        WriteLogF(
+            L"Audio relay disabled: "
+            L"AssignProcessToJobObject failed (%lu)",
+            error);
+        return;
+    }
+
+    if (ResumeThread(processInfo.hThread) ==
+        static_cast<DWORD>(-1))
+    {
+        const DWORD error = GetLastError();
+
+        TerminateProcess(processInfo.hProcess, error);
+        CloseHandle(processInfo.hThread);
+        CloseHandle(processInfo.hProcess);
+
+        WriteLogF(
+            L"Audio relay disabled: ResumeThread failed (%lu)",
+            error);
+        return;
+    }
+
+    CloseHandle(processInfo.hThread);
+    gAudioRelayProcess = processInfo.hProcess;
+
+    WriteLogF(
+        L"Audio relay enabled: %ls",
+        relayPath.c_str());
+}
+
+void StopAudioRelay()
+{
+    if (gAudioRelayProcess != nullptr)
+    {
+        CloseHandle(gAudioRelayProcess);
+        gAudioRelayProcess = nullptr;
+    }
+
+    if (gAudioRelayJob != nullptr)
+    {
+        CloseHandle(gAudioRelayJob);
+        gAudioRelayJob = nullptr;
     }
 }
 
@@ -1104,11 +1260,24 @@ bool RunEmbeddedMinecraft(const std::wstring& exeDir,
     const bool neoForgeStartedWithGameClassPath = loaderSetup.neoForgeStartedWithGameClassPath;
 
     std::vector<std::string> vmOptionStorage;
-    vmOptionStorage.reserve(16);
+    vmOptionStorage.reserve(64);
+    // 5120 MB app budget on series s dev mode, so a 3G heap that never resizes fits
     vmOptionStorage.push_back("-Xmx3G");
-    vmOptionStorage.push_back("-Xms512M");
+    vmOptionStorage.push_back("-Xms3G");
     vmOptionStorage.push_back("-XX:MaxDirectMemorySize=512M");
-    WriteLog(L"JVM memory defaults: -Xmx3G -Xms512M -XX:MaxDirectMemorySize=512M");
+
+    // ignoreUnrecognized is JNI_FALSE, so a typo in jvm_args.txt would stop it booting
+    vmOptionStorage.push_back("-XX:+IgnoreUnrecognizedVMOptions");
+    vmOptionStorage.push_back("-XX:+UnlockExperimentalVMOptions");
+    vmOptionStorage.push_back("-XX:+UseG1GC");
+    // the 200ms default target lets young gen reach 2.2G before collecting
+    vmOptionStorage.push_back("-XX:MaxGCPauseMillis=50");
+    vmOptionStorage.push_back("-XX:G1NewSizePercent=20");
+    vmOptionStorage.push_back("-XX:G1ReservePercent=20");
+    vmOptionStorage.push_back("-XX:G1HeapRegionSize=32M");
+    // hsperfdata is mmapped and rewritten every collection, on console storage that is a frame hitch
+    vmOptionStorage.push_back("-XX:+PerfDisableSharedMem");
+    WriteLog(L"JVM heap: -Xmx3G -Xms3G -XX:MaxDirectMemorySize=512M, G1 at 50ms pause target");
     vmOptionStorage.push_back("--enable-native-access=ALL-UNNAMED");
     vmOptionStorage.push_back("--add-opens=jdk.zipfs/jdk.nio.zipfs=ALL-UNNAMED");
     const std::wstring selectedJavaBasePatchName =
@@ -1206,6 +1375,23 @@ bool RunEmbeddedMinecraft(const std::wstring& exeDir,
         WriteLogF(L"LWJGL OpenGL library override missing: %s", selectedOpenGl.c_str());
     }
     WriteLogF(L"Log4j configuration: %s", FileUriFromPath(logConfigPath).c_str());
+    if (loaderId == LoaderId::Fabric) {
+        const std::wstring relayMicName = L"relay-mic.jar";
+        const std::wstring localRelayMic = exeDir + L"\\" + relayMicName;
+        const std::wstring packagedRelayMic = packageDir + L"\\" + relayMicName;
+        const std::wstring relayMic =
+            GetFileAttributesW(localRelayMic.c_str()) != INVALID_FILE_ATTRIBUTES
+                ? localRelayMic
+                : packagedRelayMic;
+        if (GetFileAttributesW(relayMic.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            if (!effectiveClassPath.empty()) effectiveClassPath += L";";
+            effectiveClassPath += relayMic;
+            WriteLogF(L"Relay microphone jar enabled: %s", relayMic.c_str());
+        } else {
+            WriteLogF(L"Relay microphone jar missing: %s", relayMic.c_str());
+        }
+    }
+    StartAudioRelay(exeDir, packageDir, gameDir);
     vmOptionStorage.push_back("-Djava.class.path=" + w2a(effectiveClassPath));
     if (loaderId == LoaderId::Forge) {
         vmOptionStorage.push_back("-DlegacyClassPath=" + w2a(effectiveClassPath));
@@ -1214,6 +1400,81 @@ bool RunEmbeddedMinecraft(const std::wstring& exeDir,
     vmOptionStorage.push_back("-Duser.dir=" + w2a(fwd(gameDir)));
     vmOptionStorage.push_back("-Dlog4j.configurationFile=" + w2a(FileUriFromPath(logConfigPath)));
     vmOptionStorage.push_back("-XX:ErrorFile=" + w2a(fwd(gameDir + L"\\hs_err_pid%p.log")));
+
+    // appended last on purpose, hotspot takes the last occurrence so this overrides the built ins
+    const std::wstring jvmArgsPath = exeDir + L"\\jvm_args.txt";
+    if (GetFileAttributesW(jvmArgsPath.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        // resolved here because the template has no way to know where LocalState landed
+        const std::wstring gcLogPath = fwd(launcherLogDir) + L"/gc.log";
+        const std::wstring tpl =
+            L"# Bandit Launcher JVM options\n"
+            L"# One option per line. Lines starting with # are ignored.\n"
+            L"#\n"
+            L"# These are appended after the launcher's own options, so anything set here\n"
+            L"# overrides the built in value. The built ins are:\n"
+            L"#   -Xmx3G -Xms3G -XX:MaxDirectMemorySize=512M\n"
+            L"#   -XX:+UseG1GC -XX:+PerfDisableSharedMem\n"
+            L"#   -XX:MaxGCPauseMillis=50 -XX:G1NewSizePercent=20\n"
+            L"#   -XX:G1ReservePercent=20 -XX:G1HeapRegionSize=32M\n"
+            L"#\n"
+            L"# Unrecognised options are ignored rather than failing the launch, so a typo\n"
+            L"# here will not stop the game starting. Check mc_launch.log for lines reading\n"
+            L"# \"jvm_args.txt applying:\" to confirm what was actually picked up.\n"
+            L"\n"
+            L"# Write a garbage collection log next to the other logs.\n"
+            L"#-Xlog:gc:file=" + gcLogPath + L":time,uptime\n"
+            L"\n"
+            L"# The 50ms pause target is now a built in, measured on box: it took the worst\n"
+            L"# young collection from 154ms down to 62ms. Lower it further if stalls are still\n"
+            L"# visible, at the cost of collecting more often.\n"
+            L"#-XX:MaxGCPauseMillis=20\n"
+            L"\n"
+            L"# More aggressive alternative, derived from server side flag sets. Only worth\n"
+            L"# trying if the built ins are not enough and you want to push further.\n"
+            L"#-XX:G1NewSizePercent=30\n"
+            L"#-XX:G1MaxNewSizePercent=40\n"
+            L"#-XX:G1HeapRegionSize=8M\n"
+            L"#-XX:MaxGCPauseMillis=37\n"
+            L"#-XX:+ParallelRefProcEnabled\n"
+            L"#-XX:+DisableExplicitGC\n"
+            L"\n"
+            L"# Cap concurrent marking to one thread if half second mark cycles are stealing\n"
+            L"# cores from the render thread. 8 cores here, minus render, server and glthread.\n"
+            L"#-XX:ConcGCThreads=1\n"
+            L"\n"
+            L"# Cap the background worker pools if chunk loading starves the render thread.\n"
+            L"#-Dmax.bg.threads=3\n"
+            L"#-XX:ActiveProcessorCount=4\n";
+        if (WriteTextFile(jvmArgsPath, tpl)) {
+            WriteLogF(L"jvm_args.txt seeded at %s", jvmArgsPath.c_str());
+        } else {
+            WriteLogF(L"jvm_args.txt could not be seeded at %s", jvmArgsPath.c_str());
+        }
+    }
+
+    std::wstring jvmArgsText;
+    if (ReadTextFile(jvmArgsPath, jvmArgsText)) {
+        int applied = 0;
+        size_t pos = 0;
+        while (pos < jvmArgsText.size()) {
+            size_t end = jvmArgsText.find(L'\n', pos);
+            if (end == std::wstring::npos) end = jvmArgsText.size();
+            const std::wstring arg = TrimWhitespace(jvmArgsText.substr(pos, end - pos));
+            pos = end + 1;
+
+            if (arg.empty() || arg[0] == L'#') continue;
+            if (arg[0] != L'-') {
+                WriteLogF(L"jvm_args.txt ignoring line, not an option: %s", arg.c_str());
+                continue;
+            }
+            vmOptionStorage.push_back(w2a(arg));
+            WriteLogF(L"jvm_args.txt applying: %s", arg.c_str());
+            ++applied;
+        }
+        WriteLogF(L"jvm_args.txt applied %d option(s) from %s", applied, jvmArgsPath.c_str());
+    } else {
+        WriteLogF(L"jvm_args.txt not present at %s, using built in options only", jvmArgsPath.c_str());
+    }
 
     std::vector<std::string> appArgs = {
         "--username", authConfig.username,
@@ -1242,8 +1503,8 @@ bool RunEmbeddedMinecraft(const std::wstring& exeDir,
     }
     fprintf(af, "# Main class\n%s\n", w2a(effectiveMainClass).c_str());
     fprintf(af, "# App args\n");
-    for (const auto& arg : appArgs) {
-        fprintf(af, "%s\n", arg.c_str());
+    for (size_t i = 0; i < appArgs.size(); ++i) {
+        fprintf(af, "%s\n", launchdiag::DiagnosticMinecraftAppArg(appArgs, i).c_str());
     }
     fclose(af);
     WriteLog(L"Embedded JVM options written");
@@ -1281,6 +1542,14 @@ bool RunEmbeddedMinecraft(const std::wstring& exeDir,
     WriteLogF(L"JNI_CreateJavaVM => %d", createResult);
     if (createResult != JNI_OK || !vm || !env) {
         return false;
+    }
+    {
+        // App.cpp reads this before the heap exists, so that one says nothing about headroom
+        unsigned long long limitMb = 0;
+        unsigned long long usedMb = 0;
+        if (ReadAppMemoryBudget(limitMb, usedMb)) {
+            WriteLogF(L"app memory after jvm create: %llu of %llu MB", usedMb, limitMb);
+        }
     }
     reportProgress(
         L"Starting Java runtime",
@@ -1339,24 +1608,69 @@ bool RunEmbeddedMinecraft(const std::wstring& exeDir,
         (L"Loading " + loaderLabel).c_str(),
         L"Mods and libraries are starting. The Mojang loading screen appears once graphics initialize.",
         0.64f);
+    const std::wstring modsetHash = telemetry::ComputeModsetHash(userModsDir);
     WriteTextFile(CrashLaunchMarkerPath(exeDir),
         std::wstring(L"minecraftVersion=") + minecraftVersion + L"\n" +
         L"launchVersion=" + launchVersion + L"\n" +
         L"jreDir=" + jreDir + L"\n" +
         L"gameDir=" + gameDir + L"\n" +
-        L"nativesDir=" + nativesDir + L"\n");
+        L"nativesDir=" + nativesDir + L"\n" +
+        L"launcherBuild=" + telemetry::LauncherBuild() + L"\n" +
+        L"loader=" + loader + L"\n" +
+        L"loaderVersion=" + loaderVersion + L"\n" +
+        L"modsetHash=" + modsetHash + L"\n");
+    DeleteFileW(LaunchSuspendedMarkerPath(exeDir).c_str());
+
+    telemetry::LaunchContext telemetryContext;
+    telemetryContext.launcherBuild = telemetry::LauncherBuild();
+    telemetryContext.mcVersion = minecraftVersion;
+    telemetryContext.loader = loader;
+    telemetryContext.loaderVersion = loaderVersion;
+    telemetryContext.modsetHash = modsetHash;
+    const unsigned long long presentedFramesAtLaunch = ShimPresentedFrames();
+    telemetry::BeginLaunch(telemetryContext);
+    telemetry::SendLaunch();
+
     std::atomic<bool> javaMainRunning{ true };
-    std::thread javaMainWatchdog([&javaMainRunning, vm, effectiveMainClass]() {
+    // getAllStackTraces is a safepoint, every dump stalls the render thread
+    const bool alwaysDumpThreads = !GetEnvVarString(L"BANDIT_JAVA_THREAD_DUMPS").empty();
+    std::thread javaMainWatchdog([
+        &javaMainRunning,
+        vm,
+        effectiveMainClass,
+        alwaysDumpThreads,
+        presentedFramesAtLaunch]() {
+        // MemoryManager is a winrt static, without an apartment here every read throws
+        const HRESULT roHr = RoInitialize(RO_INIT_MULTITHREADED);
         unsigned seconds = 0;
+        bool firstFrameSent = false;
         while (javaMainRunning.load()) {
-            std::this_thread::sleep_for(std::chrono::seconds(5));
-            seconds += 5;
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+            ++seconds;
+            if (!firstFrameSent && ShimPresentedFrames() > presentedFramesAtLaunch) {
+                firstFrameSent = true;
+                telemetry::SendFirstFrame();
+            }
+            if ((seconds % 5) != 0) continue;
             if (javaMainRunning.load()) {
-                WriteLogF(L"%s.main still running after %u seconds", effectiveMainClass.c_str(), seconds);
-                if (seconds == 15 || (seconds >= 30 && (seconds % 30) == 0)) {
+                unsigned long long limitMb = 0;
+                unsigned long long usedMb = 0;
+                if (ReadAppMemoryBudget(limitMb, usedMb)) {
+                    WriteLogF(L"%s.main still running after %u seconds, app memory %llu of %llu MB",
+                        effectiveMainClass.c_str(), seconds, usedMb, limitMb);
+                } else {
+                    WriteLogF(L"%s.main still running after %u seconds", effectiveMainClass.c_str(), seconds);
+                }
+                const bool dumpDue = alwaysDumpThreads
+                    ? (seconds == 15 || (seconds >= 30 && (seconds % 30) == 0))
+                    : (seconds == 15 || seconds == 45);
+                if (dumpDue) {
                     DumpJavaThreadStacks(vm, (effectiveMainClass + L".main watchdog").c_str());
                 }
             }
+        }
+        if (SUCCEEDED(roHr)) {
+            RoUninitialize();
         }
     });
 
@@ -1370,17 +1684,22 @@ bool RunEmbeddedMinecraft(const std::wstring& exeDir,
         LogTextFileTail(javaLog, L"java_output.log");
         LogTextFileTail(stderrLogPath, L"stderr_stream.log");
         WriteLog(L"Minecraft requested return to launcher");
+        telemetry::SendExit();
+        telemetry::EndLaunch();
         StopLogTailers();
         DeleteFileW(CrashLaunchMarkerPath(exeDir).c_str());
         return true;
     }
 
-    if (CheckAndLogJavaException(env, L"CallStaticVoidMethod(main)")) {
+    if (CheckAndLogJavaMainException(env, L"CallStaticVoidMethod(main)")) {
         LogTextFileTail(javaLog, L"java_output.log");
         LogTextFileTail(stderrLogPath, L"stderr_stream.log");
         WriteLog(L"Embedded JVM failed after startup; terminating host process to avoid JVM/native reuse");
         StopLogTailers();
         CreateCrashReportZip(exeDir, L"Java exception after Minecraft startup");
+        // the local crash screen links to the zip written above
+        telemetry::ReportSoftCrash(exeDir);
+        telemetry::EndLaunch();
         DeleteFileW(CrashLaunchMarkerPath(exeDir).c_str());
         ExitProcess(1);
         return false;
@@ -1389,8 +1708,9 @@ bool RunEmbeddedMinecraft(const std::wstring& exeDir,
     WriteLogF(L"%s.main returned", effectiveMainClass.c_str());
     g_minecraftRunning.store(false);
     WriteLog(L"Minecraft exited normally; returning to launcher menu");
+    telemetry::SendExit();
+    telemetry::EndLaunch();
     StopLogTailers();
     DeleteFileW(CrashLaunchMarkerPath(exeDir).c_str());
     return true;
 }
-

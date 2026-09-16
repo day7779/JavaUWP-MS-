@@ -1,3 +1,13 @@
+/*
+ * Vendored from securejarhandler 3.0.8
+ * (https://github.com/NeoForged/SecureJarHandler), the version NeoForge 21.1.233
+ * resolves. Forge 1.20.1 pulls 2.1.10 and is deliberately not patched with this,
+ * see forge.cpp PrepareClientArtifacts.
+ * Licensed under the GNU Lesser General Public License, version 3.
+ *
+ * Modified for Xbox UWP: package scanning tolerates the sandbox filesystem and
+ * falls back to the backing path when the union filesystem cannot walk a jar.
+ */
 package cpw.mods.jarhandling.impl;
 
 import cpw.mods.jarhandling.JarContents;
@@ -9,6 +19,7 @@ import cpw.mods.niofs.union.UnionPathFilter;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.net.URI;
+import java.nio.file.FileSystems;
 import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -264,7 +275,7 @@ public class JarContentsImpl implements JarContents {
                     if (Files.exists(file)) {
                         return Files.readAllBytes(file);
                     }
-                } else {
+                } else if (isOnDefaultFileSystem(basePath)) {
                     try (var jar = new JarFile(basePath.toFile())) {
                         var entry = jar.getJarEntry(name);
                         if (entry != null && !entry.isDirectory()) {
@@ -273,11 +284,27 @@ public class JarContentsImpl implements JarContents {
                             }
                         }
                     }
+                } else {
+                    var bytes = readEntryByStreaming(basePath, name);
+                    if (bytes != null) {
+                        return bytes;
+                    }
                 }
-            } catch (IOException ignored) {
+            } catch (IOException | RuntimeException ignored) {
             }
         }
         return new byte[0];
+    }
+
+    private static byte[] readEntryByStreaming(Path jarPath, String name) throws IOException {
+        try (var in = Files.newInputStream(jarPath); var jar = new JarInputStream(in)) {
+            for (var entry = jar.getNextJarEntry(); entry != null; entry = jar.getNextJarEntry()) {
+                if (!entry.isDirectory() && entry.getName().equals(name)) {
+                    return jar.readAllBytes();
+                }
+            }
+        }
+        return null;
     }
 
     private Optional<URI> findBackingFileUri(String name) {
@@ -307,7 +334,17 @@ public class JarContentsImpl implements JarContents {
         return Optional.empty();
     }
 
+    private static boolean isOnDefaultFileSystem(Path path) {
+        return path.getFileSystem() == FileSystems.getDefault();
+    }
+
     private static void addPackagesFromJar(Set<String> packages, Set<String> ignoredRootPackages, Path jarPath) {
+        // a jar-in-jar base path lives in the parent's zipfs, so toFile throws UnsupportedOperationException
+        if (!isOnDefaultFileSystem(jarPath)) {
+            addPackagesByStreaming(packages, ignoredRootPackages, jarPath);
+            return;
+        }
+
         try (var jar = new JarFile(jarPath.toFile())) {
             var entries = jar.entries();
             while (entries.hasMoreElements()) {
@@ -317,7 +354,19 @@ public class JarContentsImpl implements JarContents {
                 }
                 addPackageFromEntryName(packages, ignoredRootPackages, entry.getName());
             }
-        } catch (IOException ignored) {
+        } catch (IOException | RuntimeException ignored) {
+        }
+    }
+
+    private static void addPackagesByStreaming(Set<String> packages, Set<String> ignoredRootPackages, Path jarPath) {
+        try (var in = Files.newInputStream(jarPath); var jar = new JarInputStream(in)) {
+            for (var entry = jar.getNextJarEntry(); entry != null; entry = jar.getNextJarEntry()) {
+                if (entry.isDirectory()) {
+                    continue;
+                }
+                addPackageFromEntryName(packages, ignoredRootPackages, entry.getName());
+            }
+        } catch (IOException | RuntimeException ignored) {
         }
     }
 

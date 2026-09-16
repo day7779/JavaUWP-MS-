@@ -1,0 +1,23 @@
+modLoader="javafml"
+loaderVersion="[51,)"
+license="MIT"
+
+[[mods]]
+modId="banditvault_forge_controller"
+version="1.0.0"
+displayName="Bandit Controller"
+description='''Controller support for Bandit Launcher.'''
+
+[[dependencies.banditvault_forge_controller]]
+modId="forge"
+mandatory=true
+versionRange="[__FORGE_VERSION__]"
+ordering="NONE"
+side="CLIENT"
+
+[[dependencies.banditvault_forge_controller]]
+modId="minecraft"
+mandatory=true
+versionRange="[__MINECRAFT_VERSION__]"
+ordering="NONE"
+side="CLIENT"

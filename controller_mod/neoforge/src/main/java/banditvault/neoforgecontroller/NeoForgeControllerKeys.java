@@ -14,7 +14,9 @@ final class NeoForgeControllerKeys {
     final KeyMapping attack;
     final KeyMapping use;
     final KeyMapping inventory;
+    final KeyMapping drop;
     final KeyMapping swapOffhand;
+    final KeyMapping pickItem;
 
     NeoForgeControllerKeys(Options options) {
         forward = options.keyUp;
@@ -27,6 +29,8 @@ final class NeoForgeControllerKeys {
         attack = options.keyAttack;
         use = options.keyUse;
         inventory = options.keyInventory;
+        drop = options.keyDrop;
         swapOffhand = options.keySwapOffhand;
+        pickItem = options.keyPickItem;
     }
 }

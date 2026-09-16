@@ -1,6 +1,5 @@
 # Build outputs
 /build/*
-!/build/forge-install-profile.json
 /runtime/
 /META-INF/
 /banditvault/
@@ -36,9 +35,6 @@
 /logs/
 *.log
 *.log.gz
-/java_output.log
-/mc_launch.log
-/glfw_uwp.log
 /hwnd.txt
 
 # Certificates / signed artifacts
@@ -93,3 +89,6 @@ __pycache__/
 # Local auth config
 /MC.Xbox/launch_auth.json
 buildcmd.txt
+
+# shared xbox dev mode tooling config, machine-local
+xbox.json

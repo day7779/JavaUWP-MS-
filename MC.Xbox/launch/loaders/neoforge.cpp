@@ -16,79 +16,8 @@
 #include <vector>
 
 #include "third_party/miniz/miniz.h"
-static bool ExtractZipEntryToFile(const std::wstring& zipPath, const char* entryName, const std::wstring& outputPath) {
-    std::vector<unsigned char> zipBytes;
-    if (!ReadBinaryFileLimited(zipPath, zipBytes, 256ull * 1024ull * 1024ull)) {
-        WriteLogF(L"Could not read zip for extraction: %s", zipPath.c_str());
-        return false;
-    }
-
-    mz_zip_archive zip{};
-    if (!mz_zip_reader_init_mem(&zip, zipBytes.data(), zipBytes.size(), 0)) {
-        WriteLogF(L"Could not open zip for extraction: %s", zipPath.c_str());
-        return false;
-    }
-
-    const int idx = mz_zip_reader_locate_file(&zip, entryName, nullptr, 0);
-    if (idx < 0) {
-        mz_zip_reader_end(&zip);
-        WriteLogF(L"Zip entry not found: %s in %s", a2w(entryName).c_str(), zipPath.c_str());
-        return false;
-    }
-
-    size_t outSize = 0;
-    void* p = mz_zip_reader_extract_to_heap(&zip, static_cast<mz_uint>(idx), &outSize, 0);
-    mz_zip_reader_end(&zip);
-    if (!p) {
-        WriteLogF(L"Could not extract zip entry: %s", a2w(entryName).c_str());
-        return false;
-    }
-
-    const bool ok = WriteAllBytes(outputPath, p, outSize);
-    mz_free(p);
-    if (!ok) {
-        WriteLogF(L"Could not write extracted zip entry: %s", outputPath.c_str());
-    }
-    return ok;
-}
-
-static bool FileExistsNonEmpty(const std::wstring& path) {
-    WIN32_FILE_ATTRIBUTE_DATA data = {};
-    if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &data)) return false;
-    if (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) return false;
-    return data.nFileSizeHigh != 0 || data.nFileSizeLow != 0;
-}
-
-// a truncated jar from an interrupted prep is still non-empty, so the caller validates it by
-// confirming the zip parses and carries a class that must exist in a complete client.
-static bool ZipHasEntry(const std::wstring& zipPath, const char* entryName) {
-    std::vector<unsigned char> zipBytes;
-    if (!ReadBinaryFileLimited(zipPath, zipBytes, 256ull * 1024ull * 1024ull)) return false;
-    mz_zip_archive zip{};
-    if (!mz_zip_reader_init_mem(&zip, zipBytes.data(), zipBytes.size(), 0)) return false;
-    const int idx = mz_zip_reader_locate_file(&zip, entryName, nullptr, 0);
-    mz_zip_reader_end(&zip);
-    return idx >= 0;
-}
-
 // the binary-patched client only carries the classes NeoForge actually patches, so it can't be
 // checked for a specific vanilla class. a truncated jar fails central-directory parsing here.
-static bool ZipIsValid(const std::wstring& zipPath) {
-    std::vector<unsigned char> zipBytes;
-    if (!ReadBinaryFileLimited(zipPath, zipBytes, 256ull * 1024ull * 1024ull)) return false;
-    mz_zip_archive zip{};
-    if (!mz_zip_reader_init_mem(&zip, zipBytes.data(), zipBytes.size(), 0)) return false;
-    const mz_uint count = mz_zip_reader_get_num_files(&zip);
-    mz_zip_reader_end(&zip);
-    return count > 0;
-}
-
-static bool EndsWithAscii(const char* text, const char* suffix) {
-    const size_t textLen = strlen(text);
-    const size_t suffixLen = strlen(suffix);
-    return textLen >= suffixLen && strcmp(text + textLen - suffixLen, suffix) == 0;
-}
-
 static bool NeoForgeSrgJarComplete(const std::wstring& zipPath) {
     if (!FileExistsNonEmpty(zipPath)) return false;
 
@@ -412,6 +341,10 @@ static bool IsNeoForgePrepOrModuleJar(const std::wstring& entry) {
         L"/net/neoforged/autorenamingtool/",
         L"/net/neoforged/installertools/",
         L"-installer.jar",
+        // installertools dep, not a game library. iris jij's glsl-transformer which ships an
+        // unrelocated org.apache.commons.collections4.trie, so both become modules exporting the
+        // same package and the game layer fails to resolve
+        L"/org/apache/commons/commons-collections4/",
         // raw vanilla client (game/versions/<mc>/<mc>.jar) is only a prep input. NeoForge supplies
         // the patched srg client as the `minecraft` module via its production client provider, so the
         // vanilla jar on the class-path becomes a second module owning net.minecraft.* and the module

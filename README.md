@@ -10,6 +10,8 @@
 
 Bandit Launcher brings **Minecraft Java Edition** to **Xbox Developer Mode**. It is a UWP app that signs you in with your Microsoft account, verifies that you own Java Edition, downloads the official game files you need, and launches Minecraft with Fabric, Forge, or NeoForge inside the Xbox app sandbox.
 
+Join our discord [here](https://discord.gg/XTFYUKbG7g)
+
 This is a real pre release build. The launcher is playable, supports multiple Minecraft versions and loaders, can install compatible mods and modpacks from Modrinth, and includes active fixes for Xbox input, graphics, Java, and filesystem behavior.
 
 ## Who This Is For
@@ -70,6 +72,7 @@ minecraft version + loader + loader version
 
 | Target | State | Notes |
 | --- | --- | --- |
+| `26.2 + Fabric 0.19.3` | Experimental | First calendar versioned target. Unobfuscated client with no Fabric intermediary, LWJGL 3.4.1, and the Java 25 runtime. |
 | `1.21.11 + Fabric 0.19.2` | Supported | Current default target with bundled controller support. Base game has been tested. |
 | `1.21.1 + Fabric 0.19.2` | Testing | Base game, bundled controller support, and Cobblemon have been verified. Uses Java 21 for mods that require it. |
 | `1.21.1 + NeoForge 21.1.233` | Experimental | Base game, Sodium, JEI, and Modrinth modpack installs have been tested. Includes the bundled controller bridge and uses Java 21. |
@@ -112,7 +115,7 @@ Other catalog entries (additional Forge versions, older vanilla targets, and fut
 
 - Custom GLFW shim for UWP windowing, input, gamepad state, and EGL.
 - Mesa based graphics path for Xbox Series consoles.
-- Optional mouse relay: use a phone or PC as a mouse over the local network, in the launcher menus and in game.
+- Optional Bandit Relay: use a phone or PC as a mouse and a microphone over the local network, in the launcher menus and in game, and hear the game on the same device.
 - GameInput based controller support through the GLFW shim.
 - Bundled Bandit controller layer for every supported Fabric target from `1.16.5` through `1.21.11`, `1.20.1` Forge, and `1.21.1` NeoForge.
 - Shared controller settings at `config/bandit-controller.properties` (deadzones, look speed, toggle crouch/sprint).
@@ -255,19 +258,20 @@ Creator content must:
 
 ## For Developers
 
-Detailed build, patching, architecture, and legal notes live in `docs/`.
+Detailed build, patching, architecture, compatible mods, FAQs and legal notes live in `docs/`.
 
-- [Building](docs/BUILDING.md) — requirements, cache setup, packaging, nightly workflow.
-- [Architecture](docs/ARCHITECTURE.md) — UWP host layout, launch flow, and loader modules.
-- [Patching notes](docs/PATCHING.md) — why Fabric, GLFW, and sandbox patches exist.
-- [Legal notes](docs/LEGAL.md) — licensing, redistribution, and nightly package rules.
-- [Contributing](CONTRIBUTING.md) — auth policy and contribution expectations.
+- [Building](docs/BUILDING.md): requirements, cache setup, packaging, nightly workflow.
+- [Architecture](docs/ARCHITECTURE.md): UWP host layout, launch flow, and loader modules.
+- [Patching notes](docs/PATCHING.md): why Fabric, GLFW, and sandbox patches exist.
+- [Legal notes](docs/LEGAL.md): licensing, redistribution, and nightly package rules.
+- [Privacy](docs/PRIVACY.md): account data, opt-in telemetry, and the local network servers.
+- [Contributing](CONTRIBUTING.md): auth policy and contribution expectations.
+- [FAQ](docs/FAQ.md) - Contains answers to frequent questions asked by many users.
 
 Quick local build from the repo root:
 
 ```powershell
-.\scripts\download-libs.ps1
-java -jar .\staging\cache\tools\fabric-installer.jar client -dir .\staging\cache\gameDir -mcversion 1.21.11 -loader 0.19.2 -launcher win32 -noprofile
+.\scripts\setup.ps1
 .\build.ps1
 ```
 
@@ -293,7 +297,7 @@ To preview or apply cleanup:
 | `scripts/` | Setup, cleanup, asset, patch, manifest, and build helpers. |
 | `config/` | Launch target catalog used by the launcher and build. |
 | `mesa-runtime/` | Mesa UWP runtime DLLs used by local builds. |
-| `tools/mouse-relay/` | Bandit Mouse Relay companion apps (Windows and Android) that send mouse input to the console over UDP. |
+| `tools/relay/` | Bandit Relay companion app (Windows, Android and iOS) that finds the console and sends mouse and microphone input to it over UDP. |
 | `build.ps1` | Main APPX build script. |
 | `docs/` | Build, architecture, patching, and legal notes. |
 

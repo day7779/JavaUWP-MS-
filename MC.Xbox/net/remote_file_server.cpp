@@ -1,4 +1,4 @@
-﻿#include "remote_file_server.h"
+#include "remote_file_server.h"
 
 #include "http_client.h"
 #include "launcher_common.h"
@@ -194,15 +194,16 @@ static std::string GuessDownloadContentType(const std::wstring& name) {
     return "application/octet-stream";
 }
 
-static std::string GenerateRemotePin() {
+static bool GenerateRemotePin(std::string& pin) {
     unsigned value = 0;
     if (BCryptGenRandom(nullptr, reinterpret_cast<PUCHAR>(&value), sizeof(value), BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0) {
-        value = static_cast<unsigned>(GetTickCount64());
+        return false;
     }
     value = 100000 + (value % 900000);
-    char pin[16] = {};
-    sprintf_s(pin, "%06u", value);
-    return pin;
+    char buf[16] = {};
+    sprintf_s(buf, "%06u", value);
+    pin = buf;
+    return true;
 }
 
 class RemoteFileServer {
@@ -210,8 +211,13 @@ public:
     void Start(const std::wstring& runtimeRoot) {
         if (running_.load()) return;
         if (thread_.joinable()) thread_.join();
+        pin_.clear();
+        if (!GenerateRemotePin(pin_)) {
+            WriteLog(L"Remote file server not started, secure PIN generation failed");
+            return;
+        }
         runtimeRoot_ = runtimeRoot;
-        pin_ = GenerateRemotePin();
+        attempts_.clear();
         stop_.store(false);
         running_.store(true);
         thread_ = std::thread([this]() { ThreadMain(); });
@@ -236,8 +242,12 @@ public:
     std::string Pin() const { return pin_; }
     int Port() const { return port_; }
 
+    std::wstring BaseUrl() const {
+        return L"http://" + a2w(LocalAddress().c_str()) + L":" + std::to_wstring(port_);
+    }
+
     std::wstring Url() const {
-        return L"http://" + a2w(LocalAddress().c_str()) + L":" + std::to_wstring(port_) + L"/?pin=" + a2w(pin_.c_str());
+        return BaseUrl() + L"/?pin=" + a2w(pin_.c_str());
     }
 
 private:
@@ -250,6 +260,19 @@ private:
     std::wstring runtimeRoot_;
     std::string pin_;
     int port_ = kPort;
+
+    struct PinAttempts {
+        int failures = 0;
+        int lockouts = 0;
+        unsigned long long lockedUntilMs = 0;
+    };
+
+    static constexpr int kMaxPinAttempts = 10;
+    static constexpr unsigned long long kPinLockoutBaseMs = 30ull * 1000ull;
+    static constexpr unsigned long long kPinLockoutMaxMs = 15ull * 60ull * 1000ull;
+
+    // only touched from the accept loop thread, which handles one client at a time
+    std::map<unsigned long, PinAttempts> attempts_;
 
     std::string LocalAddress() const {
         char host[256] = {};
@@ -320,7 +343,7 @@ private:
         }
 
         listenSocket_.store(s);
-        WriteLogF(L"Remote file server started url=%s pin=%s", Url().c_str(), a2w(pin_.c_str()).c_str());
+        WriteLogF(L"Remote file server started url=%s", BaseUrl().c_str());
 
         while (!stop_.load()) {
             fd_set readSet;
@@ -331,14 +354,16 @@ private:
             tv.tv_usec = 250000;
             const int ready = select(0, &readSet, nullptr, nullptr, &tv);
             if (ready <= 0) continue;
-            SOCKET client = accept(s, nullptr, nullptr);
+            sockaddr_in peerAddr = {};
+            int peerLen = static_cast<int>(sizeof(peerAddr));
+            SOCKET client = accept(s, reinterpret_cast<sockaddr*>(&peerAddr), &peerLen);
             if (client == INVALID_SOCKET) continue;
             if (stop_.load()) {
                 closesocket(client);
                 break;
             }
             clientSocket_.store(client);
-            HandleClient(client);
+            HandleClient(client, peerAddr.sin_addr.s_addr);
             clientSocket_.compare_exchange_strong(client, INVALID_SOCKET);
             closesocket(client);
         }
@@ -348,6 +373,8 @@ private:
         WSACleanup();
         WriteLog(L"Remote file server stopped");
     }
+
+    static constexpr unsigned long long kMaxUploadBytes = 512ull * 1024ull * 1024ull;
 
     bool ReadRequest(SOCKET s, std::string& request, std::string& body, std::map<std::string, std::string>& headers) {
         std::string data;
@@ -385,9 +412,17 @@ private:
         if (it != headers.end()) {
             contentLength = strtoull(it->second.c_str(), nullptr, 10);
         }
-        if (contentLength > 512ull * 1024ull * 1024ull) return false;
+        if (contentLength > kMaxUploadBytes) {
+            SendHttpResponse(s, 413, "Payload Too Large", "text/html; charset=utf-8",
+                Layout("Upload too large",
+                    "<h1>Upload too large</h1><p>The console accepts uploads up to "
+                    + FormatBytes(kMaxUploadBytes) + ".</p>"));
+            return false;
+        }
 
         body = data.substr(headerEnd + 4);
+        // string doubles its way up to contentLength without this
+        if (contentLength > body.size()) body.reserve(static_cast<size_t>(contentLength));
         while (body.size() < contentLength) {
             const int read = recv(s, buffer, sizeof(buffer), 0);
             if (read <= 0) return false;
@@ -400,6 +435,44 @@ private:
     bool Authorized(const std::string& query, const std::string& body) const {
         if (QueryValue(query, "pin") == pin_) return true;
         return body.find("name=\"pin\"\r\n\r\n" + pin_) != std::string::npos;
+    }
+
+    static bool SuppliedPin(const std::string& query, const std::string& body) {
+        if (!QueryValue(query, "pin").empty()) return true;
+        return body.find("name=\"pin\"\r\n\r\n") != std::string::npos;
+    }
+
+    static std::string FormatPeer(unsigned long peer) {
+        in_addr addr = {};
+        addr.s_addr = static_cast<ULONG>(peer);
+        char ip[INET_ADDRSTRLEN] = {};
+        if (!inet_ntop(AF_INET, &addr, ip, sizeof(ip))) return "unknown";
+        return ip;
+    }
+
+    bool PeerLockedOut(unsigned long peer) {
+        auto it = attempts_.find(peer);
+        if (it == attempts_.end() || it->second.lockedUntilMs == 0) return false;
+        if (GetTickCount64() < it->second.lockedUntilMs) return true;
+        it->second.lockedUntilMs = 0;
+        it->second.failures = 0;
+        return false;
+    }
+
+    void NotePinFailure(unsigned long peer) {
+        PinAttempts& state = attempts_[peer];
+        if (++state.failures < kMaxPinAttempts) return;
+        state.failures = 0;
+        const unsigned long long lockMs =
+            (std::min)(kPinLockoutBaseMs << (std::min)(state.lockouts, 5), kPinLockoutMaxMs);
+        ++state.lockouts;
+        state.lockedUntilMs = GetTickCount64() + lockMs;
+        WriteLogF(L"Remote file server locked out %s for %llus after %d wrong PINs",
+            a2w(FormatPeer(peer).c_str()).c_str(), lockMs / 1000ull, kMaxPinAttempts);
+    }
+
+    void NotePinSuccess(unsigned long peer) {
+        attempts_.erase(peer);
     }
 
     static std::string FormatBytes(unsigned long long bytes) {
@@ -437,7 +510,7 @@ private:
         return html.str();
     }
 
-    void HandleClient(SOCKET s) {
+    void HandleClient(SOCKET s, unsigned long peer) {
         std::string request;
         std::string body;
         std::map<std::string, std::string> headers;
@@ -455,7 +528,16 @@ private:
         const std::string path = q == std::string::npos ? target : target.substr(0, q);
         const std::string query = q == std::string::npos ? std::string() : target.substr(q + 1);
 
+        if (PeerLockedOut(peer)) {
+            SendHttpResponse(s, 429, "Too Many Requests", "text/html; charset=utf-8",
+                Layout("Bandit Remote Files",
+                    "<div class=\"card\"><h1>Too many attempts</h1>"
+                    "<p class=\"muted\">Too many wrong PINs from this device. Wait and try again, or reopen the remote files page on your Xbox for a new PIN.</p></div>"));
+            return;
+        }
+
         if (!Authorized(query, body)) {
+            if (SuppliedPin(query, body)) NotePinFailure(peer);
             std::string form = "<div class=\"top\"><div><h1>Bandit Remote Files</h1><p class=\"muted\">Enter the PIN shown on your Xbox to manage files on this device.</p></div></div>"
                 "<div class=\"card\"><form method=\"get\">"
                 "<div class=\"field\"><label for=\"pin\">PIN</label><input id=\"pin\" name=\"pin\" inputmode=\"numeric\" pattern=\"[0-9]{6}\" maxlength=\"6\" autofocus></div>"
@@ -463,6 +545,7 @@ private:
             SendHttpResponse(s, 401, "Unauthorized", "text/html; charset=utf-8", Layout("Bandit Remote Files", form));
             return;
         }
+        NotePinSuccess(peer);
 
         if (method == "GET" && path == "/") {
             SendHttpResponse(s, 200, "OK", "text/html; charset=utf-8", Layout("Bandit Launcher", HomeHtml(query)));
@@ -1267,7 +1350,7 @@ a.btn{text-decoration:none;display:inline-block}
 <div class="body"><nav class="rail" id="rail"></nav><div class="main">
 <div class="bar2"><div class="crumbs" id="crumbs"></div><div id="extra"></div></div>
 <div class="list" id="list"></div></div></div>
-<div id="drop" class="drop">Drop files to upload</div>
+<div id="drop" class="drop">Drop files or folders to upload</div>
 <div id="editor" class="editor"><div class="ehead"><span id="epath" class="pa"></span>
 <button class="btn primary" id="savebtn" onclick="saveEd()">Save</button>
 <button class="btn" onclick="openEd(edPath)">Reload</button>
@@ -1369,11 +1452,35 @@ async function mkdir(){
  var r=await fetch('/api/mkdir',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'pin='+enc(CFG.pin)+'&profile='+enc(CFG.profile)+'&scope='+enc(CFG.scope)+'&path='+enc(cur)+'&name='+enc(nn)});
  toast(r.ok?'Folder created':'Failed');load(cur);
 }
+async function uploadOne(file,sub){
+ var fd=new FormData();fd.append('file',file);
+ var dest=sub?join(cur,sub):cur;
+ var r=await fetch('/api/upload'+q('&path='+enc(dest)),{method:'POST',body:fd});
+ return r.ok;
+}
 async function upload(files){
  if(!files||!files.length)return;
- for(var i=0;i<files.length;i++){var fd=new FormData();fd.append('file',files[i]);
-  await fetch('/api/upload'+q('&path='+enc(cur)),{method:'POST',body:fd});}
- toast(files.length+' file(s) uploaded');document.getElementById('up').value='';load(cur);
+ var ok=0;
+ for(var i=0;i<files.length;i++){if(await uploadOne(files[i],''))ok++}
+ toast(ok+'/'+files.length+' file(s) uploaded');document.getElementById('up').value='';load(cur);
+}
+function entryFile(en){return new Promise(function(res,rej){en.file(res,rej)})}
+function entryBatch(rd){return new Promise(function(res,rej){rd.readEntries(res,rej)})}
+async function walkEntry(en,sub,out){
+ if(en.isFile){out.push({entry:en,sub:sub});return}
+ if(!en.isDirectory)return;
+ var next=sub?sub+'/'+en.name:en.name,rd=en.createReader(),batch;
+ // readEntries only returns a partial batch, keep going until it comes back empty
+ do{batch=await entryBatch(rd);for(var i=0;i<batch.length;i++)await walkEntry(batch[i],next,out)}while(batch.length)
+}
+async function uploadDropped(roots){
+ var flat=[];
+ for(var j=0;j<roots.length;j++){try{await walkEntry(roots[j],'',flat)}catch(e){}}
+ if(!flat.length){toast('Nothing to upload');return}
+ toast('Uploading '+flat.length+' file(s)...');
+ var ok=0;
+ for(var k=0;k<flat.length;k++){try{if(await uploadOne(await entryFile(flat[k].entry),flat[k].sub))ok++}catch(e){}}
+ toast(ok+'/'+flat.length+' file(s) uploaded');load(cur);
 }
 function openEd(p){
  fetch('/api/raw'+q('&path='+enc(p))).then(function(r){if(!r.ok)throw 0;return r.text()}).then(function(t){
@@ -1395,7 +1502,12 @@ var dz=document.getElementById('drop'),dc=0;
 window.addEventListener('dragenter',function(e){e.preventDefault();if(!canWrite)return;dc++;dz.classList.add('show')});
 window.addEventListener('dragover',function(e){e.preventDefault()});
 window.addEventListener('dragleave',function(e){dc--;if(dc<=0)dz.classList.remove('show')});
-window.addEventListener('drop',function(e){e.preventDefault();dc=0;dz.classList.remove('show');if(canWrite&&e.dataTransfer.files.length)upload(e.dataTransfer.files)});
+window.addEventListener('drop',function(e){e.preventDefault();dc=0;dz.classList.remove('show');if(!canWrite)return;
+ var dt=e.dataTransfer,roots=[];
+ // has to run before the first await or the item list is gone
+ if(dt.items)for(var i=0;i<dt.items.length;i++){var en=dt.items[i].webkitGetAsEntry?dt.items[i].webkitGetAsEntry():null;if(en)roots.push(en)}
+ if(roots.length)uploadDropped(roots);
+ else if(dt.files.length)upload(dt.files)});
 initChrome();load('');
 )RFSPA";
     }

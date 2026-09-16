@@ -1,3 +1,12 @@
+/*
+ * Vendored from Fabric Loader (https://github.com/FabricMC/fabric-loader).
+ * Applied against Fabric Loader 0.19.2 and 0.14.25; the source release it was
+ * copied from is not recorded.
+ * Licensed under the Apache License, Version 2.0.
+ *
+ * Modified for Xbox UWP: normalizeExistingPath0 uses toAbsolutePath().normalize()
+ * instead of toRealPath(), which the sandbox blocks.
+ */
 package net.fabricmc.loader.impl.util;
 
 import java.io.IOException;
@@ -44,7 +53,7 @@ public final class LoaderUtil {
     private static Path normalizeExistingPath0(Path path) {
         // Xbox UWP patch: toRealPath() calls GetFinalPathNameByHandle which is
         // blocked in the Xbox Dev Mode sandbox. Use toAbsolutePath().normalize()
-        // instead — equivalent for our purposes since there are no symlinks.
+        // equivalent here because there are no symlinks
         try {
             return path.toAbsolutePath().normalize();
         } catch (Exception e) {

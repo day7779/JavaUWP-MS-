@@ -343,6 +343,15 @@ void ArchivePreviousCrashIfNeeded(const std::wstring& runtimeRoot) {
         markerPath = legacyMarkerPath;
     }
 
+    // the os can reclaim suspended apps during a normal quit
+    const std::wstring suspendedPath = LaunchSuspendedMarkerPath(runtimeRoot);
+    if (GetFileAttributesW(suspendedPath.c_str()) != INVALID_FILE_ATTRIBUTES) {
+        WriteLog(L"Previous Minecraft launch was suspended, clearing markers");
+        DeleteFileW(suspendedPath.c_str());
+        DeleteFileW(markerPath.c_str());
+        return;
+    }
+
     WriteLog(L"Previous Minecraft launch marker found; archiving logs before truncation");
     CreateCrashReportZip(runtimeRoot, L"Previous Minecraft launch did not exit cleanly");
     DeleteFileW(markerPath.c_str());

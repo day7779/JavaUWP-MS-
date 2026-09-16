@@ -19,13 +19,21 @@ $modId = "banditvault_forge_controller"
 $jarName = "banditvault-forge-controller-1.0.0.jar"
 $jarPath = Join-Path $buildRoot $jarName
 $gameDir = Get-ConfigPath "GameDir"
-$profilePath = Join-Path $root "build\forge-install-profile.json"
+$profilePath = Join-Path $root "config\forge-install-profile.json"
 
 $javaHome = Resolve-JavaHome
 $javac = Join-Path $javaHome "bin\javac.exe"
 $jar = Join-Path $javaHome "bin\jar.exe"
 
-if ($MinecraftVersion -ne "1.20.1" -or $ForgeVersion -ne "1.20.1-47.4.20") {
+if ($MinecraftVersion -ne "1.20.1") {
+    & (Join-Path $PSScriptRoot "build_forge_modern_controller_mod.ps1") `
+        -MinecraftVersion $MinecraftVersion `
+        -ForgeVersion $ForgeVersion `
+        -OutputDir $OutputDir
+    return
+}
+
+if ($ForgeVersion -ne "1.20.1-47.4.20") {
     throw "Forge controller mod sources currently support only Minecraft 1.20.1 / Forge 1.20.1-47.4.20."
 }
 
@@ -49,7 +57,7 @@ if (-not (Test-Path $profilePath)) {
 $forgeProfile = Get-Content -Raw -Path $profilePath | ConvertFrom-Json
 
 Remove-Item -Recurse -Force $buildRoot -ErrorAction SilentlyContinue
-New-Item -ItemType Directory -Force -Path $classesDir, $compileOnlyDir | Out-Null
+Ensure-Dir $classesDir, $compileOnlyDir
 
 $compileJava = Join-Path $PSScriptRoot "src\compile\java"
 $compileOnlySources = @(Get-ChildItem $compileJava -Recurse -Filter "*.java" -ErrorAction SilentlyContinue)
@@ -167,7 +175,7 @@ if ($manifestText -notmatch "MixinConfigs:\s*banditvault-forge-controller\.mixin
 }
 
 if ($OutputDir) {
-    New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
+    Ensure-Dir $OutputDir
     Copy-Item $jarPath (Join-Path $OutputDir $jarName) -Force
 }
 Write-Host "Forge controller mod built ($ForgeVersion) -> $jarPath"

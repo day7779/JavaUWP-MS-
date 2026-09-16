@@ -1,0 +1,10 @@
+modLoader="lowcodefml"
+loaderVersion="[1,)"
+license="All Rights Reserved"
+
+[[mods]]
+modId="bandit_mic_relay"
+version="1.0.0"
+displayName="Bandit Mic Relay"
+description='''Virtual microphone provider for the Bandit relay. Lets voice chat mods capture audio sent from a companion device over the local network.'''
+displayTest="IGNORE_ALL_VERSION"

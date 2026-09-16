@@ -9,10 +9,6 @@ on:
       - "tools/relay/**"
   workflow_dispatch:
 
-concurrency:
-  group: relay-nightly
-  cancel-in-progress: true
-
 permissions:
   contents: write
 
@@ -65,14 +61,14 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
-        with:
-          packages: |
-            platform-tools
-            platforms;android-36
-            build-tools;36.0.0
-            ndk;28.2.13676358
-            cmake;3.22.1
-          accept-android-sdk-licenses: true
+
+      - name: Install Android build packages
+        shell: bash
+        run: |
+          set +o pipefail
+          yes | sdkmanager --licenses >/dev/null
+          set -o pipefail
+          sdkmanager --install "platform-tools" "platforms;android-36" "build-tools;36.0.0" "ndk;28.2.13676358" "cmake;3.22.1"
 
       - name: Build Android APK
         working-directory: tools/relay/android
@@ -149,8 +145,8 @@ jobs:
   publish:
     name: Publish relay assets
     runs-on: ubuntu-latest
-    # experimental branches build but must not clobber the nightly release
-    if: github.ref == 'refs/heads/main'
+  # experimental branches build but must not clobber the nightly release
+  if: github.ref == 'refs/heads/main'
     needs:
       - windows
       - android

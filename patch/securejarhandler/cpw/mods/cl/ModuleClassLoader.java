@@ -1,3 +1,14 @@
+/*
+ * Vendored from securejarhandler 3.0.8
+ * (https://github.com/NeoForged/SecureJarHandler), the version NeoForge 21.1.233
+ * resolves. Forge 1.20.1 pulls 2.1.10 and is deliberately not patched with this,
+ * see forge.cpp PrepareClientArtifacts.
+ * Licensed under the GNU Lesser General Public License, version 3.
+ *
+ * Modified for Xbox UWP: adds module read edges the sandbox layer misses, plus a
+ * resource and class lookup fallback for Minecraft classes the secure jar module
+ * loader resolves differently under the embedded JVM.
+ */
 package cpw.mods.cl;
 
 import cpw.mods.jarhandling.impl.JarContentsImpl;

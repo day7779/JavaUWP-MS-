@@ -1,7 +1,9 @@
 package banditvault.neoforgecontroller;
 
 import banditvault.controllercore.ControllerAxis;
+import banditvault.controllercore.ControllerAction;
 import banditvault.controllercore.ControllerButton;
+import banditvault.controllercore.ControllerInput;
 import banditvault.controllercore.ControllerRuntime;
 import banditvault.controllercore.ControllerState;
 import banditvault.controllercore.GridNavigation;
@@ -10,14 +12,15 @@ import com.mojang.blaze3d.platform.InputConstants;
 import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.Options;
-import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.client.gui.screens.inventory.AbstractContainerScreen;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.network.chat.Component;
-import net.minecraft.world.inventory.ClickType;
+import net.minecraft.world.MenuProvider;
 import net.minecraft.world.inventory.Slot;
+import net.minecraft.world.phys.BlockHitResult;
+import net.minecraft.world.phys.HitResult;
 import org.lwjgl.glfw.GLFW;
 import org.lwjgl.glfw.GLFWGamepadState;
 
@@ -25,8 +28,8 @@ public final class NeoForgeControllerCompat {
     private static final int GAMEPAD_ID = GLFW.GLFW_JOYSTICK_1;
     private static final int LEFT_CLICK = 0;
     private static final int RIGHT_CLICK = 1;
-    private static final double RELAY_CURSOR_MOVE_EPSILON = 0.75;
-    private static final double CONTROLLER_CURSOR_TAKEOVER_THRESHOLD = 0.35;
+    private static final double RELAY_CURSOR_MOVE_EPSILON = 0.5;
+    private static final double CONTROLLER_CURSOR_TAKEOVER_THRESHOLD = 0.20;
 
     private static final GLFWGamepadState GLFW_STATE = GLFWGamepadState.create();
     private static final ControllerState CONTROLLER_STATE = new ControllerState();
@@ -41,12 +44,9 @@ public final class NeoForgeControllerCompat {
     private static boolean sprintToggled;
     private static double cursorX = -1.0;
     private static double cursorY = -1.0;
-    private static double renderedCursorX = -1.0;
-    private static double renderedCursorY = -1.0;
     private static int scrollCooldown;
     private static long lastLookNanos;
     private static long lastScreenCursorNanos;
-    private static long lastRenderedCursorNanos;
     private static long renderFrameActiveNanos;
     private static boolean loggedLookApplied;
     private static Object lastCursorScreen;
@@ -55,6 +55,8 @@ public final class NeoForgeControllerCompat {
     private static double lastRelayCursorY = Double.NaN;
     private static boolean relayOwnsCursor;
     private static boolean snapStickLatched;
+    private static KeyMapping radialPressedKey;
+    private static final java.util.Map<String, KeyMapping> JAVA_KEYS_DOWN = new java.util.HashMap<String, KeyMapping>();
     private static CursorMode cursorMode = CursorMode.SNAP;
 
     private enum CursorMode {
@@ -81,17 +83,23 @@ public final class NeoForgeControllerCompat {
         ensureInitialized();
         tickCount++;
         if (client == null) {
+            releaseJavaKeyMappings();
             return;
         }
         ensureMenuCursorMode(client);
+        releaseRadialKey();
 
         if (!poll()) {
+            releaseJavaKeyMappings();
+            if (NeoForgeClientApi.screen(client) instanceof NeoForgeControllerRadialScreen) {
+                NeoForgeClientApi.setScreen(client, null);
+            }
             if (!loggedNoGamepad || tickCount <= 5 || tickCount % 600 == 0) {
                 loggedNoGamepad = true;
                 NeoForgeControllerLog.log("No GLFW gamepad detected on joystick 1 (tick=" + tickCount + ")");
             }
             if (active) {
-                releaseGameplayKeys(client, client.screen == null);
+                releaseGameplayKeys(client, NeoForgeClientApi.screen(client) == null);
                 crouchToggled = false;
                 sprintToggled = false;
                 active = false;
@@ -106,10 +114,15 @@ public final class NeoForgeControllerCompat {
             NeoForgeControllerLog.log("NeoForge controller compat active");
         }
 
-        if (client.screen != null) {
+        tickJavaKeyMappings(
+            client,
+            NeoForgeControllerSettings.get(),
+            NeoForgeClientApi.screen(client) == null && client.player != null && client.isWindowActive());
+
+        if (NeoForgeClientApi.screen(client) != null) {
             lastLookNanos = 0L;
             releaseGameplayKeys(client, false);
-            tickScreen(client, client.screen);
+            tickScreen(client, NeoForgeClientApi.screen(client));
         } else {
             tickGameplay(client);
         }
@@ -119,7 +132,7 @@ public final class NeoForgeControllerCompat {
 
     public static void renderFrame(Minecraft client) {
         ensureMenuCursorMode(client);
-        if (client == null || client.screen != null || client.player == null || !poll()) {
+        if (client == null || NeoForgeClientApi.screen(client) != null || client.player == null || !poll()) {
             lastLookNanos = 0L;
             return;
         }
@@ -144,22 +157,73 @@ public final class NeoForgeControllerCompat {
         applyLook(client.player, axis(GLFW.GLFW_GAMEPAD_AXIS_RIGHT_X), y, seconds, settings);
     }
 
-    public static void renderCursor(Screen screen, GuiGraphics graphics) {
+    public static void renderCursor(Screen screen, Object graphics) {
         Minecraft client = Minecraft.getInstance();
-        if (!active || screen == null || graphics == null || client == null || client.screen != screen) {
+        if (screen instanceof NeoForgeControllerSettingsScreen || screen instanceof NeoForgeControllerRadialScreen) {
             return;
         }
-        if (relayOwnsCursor || renderedCursorX < 0.0 || renderedCursorY < 0.0) {
+        if (!active || screen == null || graphics == null || client == null || NeoForgeClientApi.screen(client) != screen) {
             return;
         }
-        int x = (int) Math.round(renderedCursorX);
-        int y = (int) Math.round(renderedCursorY);
-        graphics.pose().pushPose();
-        graphics.pose().translate(0.0, 0.0, 1000.0);
-        graphics.fill(x - 3, y - 3, x + 4, y + 4, 0x66000000);
-        graphics.fill(x - 5, y, x + 6, y + 1, 0xFFFFFFFF);
-        graphics.fill(x, y - 5, x + 1, y + 6, 0xFFFFFFFF);
-        graphics.pose().popPose();
+        if (!relayOwnsCursor) renderControllerGuide(screen, graphics, client);
+        if (relayOwnsCursor || cursorX < 0.0 || cursorY < 0.0) {
+            return;
+        }
+        int x = (int) Math.round(cursorX);
+        int y = (int) Math.round(cursorY);
+        NeoForgeVersionApi.renderCursor(graphics, x, y);
+    }
+
+    private static void renderControllerGuide(Screen screen, Object graphics, Minecraft client) {
+        NeoForgeControllerSettings settings = NeoForgeControllerSettings.get();
+        boolean container = screen instanceof AbstractContainerScreen;
+        NeoForgeControllerGuide.drawVerticalLeft(graphics, client.font, 8, 8,
+            new ControllerInput[] {
+                settings.binding(ControllerAction.MENU_ACCEPT),
+                settings.binding(ControllerAction.MENU_CANCEL)
+            },
+            new String[] { "Select", "Back" });
+        NeoForgeControllerGuide.drawVerticalRight(graphics, client.font, screen.width - 8, 8,
+            container
+                ? new ControllerInput[] {
+                    settings.binding(ControllerAction.QUICK_MOVE),
+                    settings.binding(ControllerAction.MENU_SECONDARY),
+                    settings.binding(ControllerAction.SNAP_FREE_TOGGLE)
+                }
+                : new ControllerInput[] { settings.binding(ControllerAction.SNAP_FREE_TOGGLE) },
+            container
+                ? new String[] { "Quick Move", "Secondary", cursorMode == CursorMode.SNAP ? "Free Cursor" : "Snap Cursor" }
+                : new String[] { cursorMode == CursorMode.SNAP ? "Free Cursor" : "Snap Cursor" });
+    }
+
+    public static void renderGameplayGuide(Object graphics) {
+        Minecraft client = Minecraft.getInstance();
+        if (!active || graphics == null || client == null || NeoForgeClientApi.screen(client) != null || client.player == null || NeoForgeClientApi.isHudHidden(client)) return;
+        NeoForgeControllerSettings settings = NeoForgeControllerSettings.get();
+        BlockHitResult blockHit = client.hitResult instanceof BlockHitResult
+            && client.hitResult.getType() == HitResult.Type.BLOCK
+                ? (BlockHitResult)client.hitResult
+                : null;
+        boolean openable = blockHit != null && client.level != null && client.level.getBlockEntity(blockHit.getBlockPos()) instanceof MenuProvider;
+        boolean hasTarget = client.hitResult != null && client.hitResult.getType() != HitResult.Type.MISS;
+        boolean mainHandItem = !client.player.getMainHandItem().isEmpty();
+        boolean heldItem = mainHandItem || !client.player.getOffhandItem().isEmpty();
+        NeoForgeControllerGuide.drawVerticalLeft(graphics, client.font, 8, 8,
+            new ControllerInput[] {
+                settings.binding(ControllerAction.JUMP),
+                settings.binding(ControllerAction.SNEAK)
+            },
+            new String[] { "Jump", "Sneak" });
+        NeoForgeControllerGuide.drawVerticalRight(graphics, client.font, NeoForgeVersionApi.guiWidth(graphics) - 8, 8,
+            new ControllerInput[] {
+                settings.binding(ControllerAction.INVENTORY),
+                settings.binding(ControllerAction.RADIAL_MENU),
+                blockHit == null ? ControllerInput.UNBOUND : settings.binding(ControllerAction.ATTACK),
+                hasTarget || heldItem ? settings.binding(ControllerAction.USE) : ControllerInput.UNBOUND,
+                mainHandItem ? settings.binding(ControllerAction.DROP) : ControllerInput.UNBOUND,
+                settings.binding(ControllerAction.SWAP_HANDS)
+            },
+            new String[] { "Open Inventory", "Radial Menu", "Mine", openable ? "Open" : "Use", "Drop Item", "Swap Hands" });
     }
 
     public static boolean shouldRenderCursorInBaseScreen(Screen screen) {
@@ -168,28 +232,24 @@ public final class NeoForgeControllerCompat {
 
     public static void updateScreenCursorBeforeRender(Screen screen, int mouseX, int mouseY) {
         ensureMenuCursorMode(Minecraft.getInstance());
-        if (!active || screen == null || Minecraft.getInstance() == null || Minecraft.getInstance().screen != screen) {
+        if (!active || screen == null || Minecraft.getInstance() == null || NeoForgeClientApi.screen(Minecraft.getInstance()) != screen) {
             return;
         }
         observeRelayCursor(screen);
         if (relayOwnsCursor) {
             invokeScreenMouseMoved(screen, lastRelayCursorX, lastRelayCursorY);
-            lastRenderedCursorNanos = System.nanoTime();
             return;
         }
         if (cursorMode == CursorMode.FREE) {
             updateScreenCursor(Minecraft.getInstance(), screen, true);
-            renderedCursorX = cursorX;
-            renderedCursorY = cursorY;
         } else {
-            advanceRenderedCursor();
             invokeScreenMouseMoved(screen, cursorX, cursorY);
         }
     }
 
     public static int screenMouseX(Screen screen, int fallback) {
         Minecraft client = Minecraft.getInstance();
-        if (!active || relayOwnsCursor || cursorX < 0.0 || client == null || client.screen != screen) {
+        if (!active || relayOwnsCursor || cursorX < 0.0 || client == null || NeoForgeClientApi.screen(client) != screen) {
             return fallback;
         }
         return (int) Math.round(cursorX);
@@ -197,7 +257,7 @@ public final class NeoForgeControllerCompat {
 
     public static int screenMouseY(Screen screen, int fallback) {
         Minecraft client = Minecraft.getInstance();
-        if (!active || relayOwnsCursor || cursorY < 0.0 || client == null || client.screen != screen) {
+        if (!active || relayOwnsCursor || cursorY < 0.0 || client == null || NeoForgeClientApi.screen(client) != screen) {
             return fallback;
         }
         return (int) Math.round(cursorY);
@@ -221,10 +281,10 @@ public final class NeoForgeControllerCompat {
     }
 
     private static void ensureMenuCursorMode(Minecraft client) {
-        if (client == null || client.screen == null || client.getWindow() == null) {
+        if (client == null || NeoForgeClientApi.screen(client) == null || client.getWindow() == null) {
             return;
         }
-        long window = client.getWindow().getWindow();
+        long window = NeoForgeVersionApi.windowHandle(client);
         if (window != 0L && GLFW.glfwGetInputMode(window, GLFW.GLFW_CURSOR) != GLFW.GLFW_CURSOR_NORMAL) {
             GLFW.glfwSetInputMode(window, GLFW.GLFW_CURSOR, GLFW.GLFW_CURSOR_NORMAL);
         }
@@ -238,60 +298,77 @@ public final class NeoForgeControllerCompat {
         }
         NeoForgeControllerKeys keys = new NeoForgeControllerKeys(options);
 
+        if (pressed(settings, ControllerAction.RADIAL_MENU)) {
+            releaseGameplayKeys(client, true);
+            NeoForgeClientApi.setScreen(client, new NeoForgeControllerRadialScreen());
+            return;
+        }
+
+        if (pressed(GLFW.GLFW_GAMEPAD_BUTTON_BACK)) {
+            NeoForgeClientApi.setScreen(client, new NeoForgeControllerSettingsScreen(null));
+            return;
+        }
+
         float lx = axis(GLFW.GLFW_GAMEPAD_AXIS_LEFT_X);
         float ly = axis(GLFW.GLFW_GAMEPAD_AXIS_LEFT_Y);
         setHeld(keys.forward, ly < -settings.moveDeadzone);
         setHeld(keys.back, ly > settings.moveDeadzone);
         setHeld(keys.left, lx < -settings.moveDeadzone);
         setHeld(keys.right, lx > settings.moveDeadzone);
-        setHeld(keys.jump, button(GLFW.GLFW_GAMEPAD_BUTTON_A));
+        setHeld(keys.jump, button(settings, ControllerAction.JUMP));
 
         boolean sneakHeld;
         if (settings.toggleCrouch) {
-            if (pressed(GLFW.GLFW_GAMEPAD_BUTTON_B)) {
+            if (pressed(settings, ControllerAction.SNEAK)) {
                 crouchToggled = !crouchToggled;
             }
             sneakHeld = crouchToggled;
         } else {
             crouchToggled = false;
-            sneakHeld = button(GLFW.GLFW_GAMEPAD_BUTTON_B);
+            sneakHeld = button(settings, ControllerAction.SNEAK);
         }
         sneakHeld = setHeld(keys.sneak, sneakHeld);
         setSneakInput(client.player, sneakHeld);
 
-        setHeld(keys.attack, trigger(GLFW.GLFW_GAMEPAD_AXIS_RIGHT_TRIGGER));
-        setHeld(keys.use, trigger(GLFW.GLFW_GAMEPAD_AXIS_LEFT_TRIGGER));
+        setHeld(keys.attack, button(settings, ControllerAction.ATTACK));
+        setHeld(keys.use, button(settings, ControllerAction.USE));
 
         if (settings.toggleSprint) {
-            if (pressed(GLFW.GLFW_GAMEPAD_BUTTON_LEFT_THUMB)) {
+            if (pressed(settings, ControllerAction.SPRINT)) {
                 sprintToggled = !sprintToggled;
             }
             setHeld(keys.sprint, sprintToggled);
         } else {
             sprintToggled = false;
-            setHeld(keys.sprint, button(GLFW.GLFW_GAMEPAD_BUTTON_LEFT_THUMB));
+            setHeld(keys.sprint, button(settings, ControllerAction.SPRINT));
         }
 
-        if (triggerPressed(GLFW.GLFW_GAMEPAD_AXIS_RIGHT_TRIGGER)) {
+        if (pressed(settings, ControllerAction.ATTACK)) {
             pressKey(keys.attack);
         }
-        if (triggerPressed(GLFW.GLFW_GAMEPAD_AXIS_LEFT_TRIGGER)) {
+        if (pressed(settings, ControllerAction.USE)) {
             pressKey(keys.use);
         }
-        if (pressed(GLFW.GLFW_GAMEPAD_BUTTON_Y)) {
+        if (pressed(settings, ControllerAction.INVENTORY)) {
             pressKey(keys.inventory);
         }
-        if (pressed(GLFW.GLFW_GAMEPAD_BUTTON_X)) {
+        if (pressed(settings, ControllerAction.DROP)) {
+            pressKey(keys.drop);
+        }
+        if (pressed(settings, ControllerAction.SWAP_HANDS)) {
             pressKey(keys.swapOffhand);
         }
+        if (pressed(settings, ControllerAction.PICK_BLOCK)) {
+            pressKey(keys.pickItem);
+        }
 
-        if (pressed(GLFW.GLFW_GAMEPAD_BUTTON_LEFT_BUMPER)) {
+        if (pressed(settings, ControllerAction.HOTBAR_PREVIOUS)) {
             changeHotbarSlot(client.player, -1);
         }
-        if (pressed(GLFW.GLFW_GAMEPAD_BUTTON_RIGHT_BUMPER)) {
+        if (pressed(settings, ControllerAction.HOTBAR_NEXT)) {
             changeHotbarSlot(client.player, 1);
         }
-        if (pressed(GLFW.GLFW_GAMEPAD_BUTTON_START)) {
+        if (pressed(settings, ControllerAction.PAUSE)) {
             client.pauseGame(false);
         }
 
@@ -306,6 +383,34 @@ public final class NeoForgeControllerCompat {
 
     private static void tickScreen(Minecraft client, Screen screen) {
         NeoForgeControllerSettings settings = NeoForgeControllerSettings.get();
+
+        if (screen instanceof NeoForgeControllerRadialScreen) {
+            NeoForgeControllerRadialScreen radial = (NeoForgeControllerRadialScreen)screen;
+            if (client.player == null || !client.isWindowActive()) {
+                NeoForgeClientApi.setScreen(client, null);
+                return;
+            }
+            radial.setSelectedSlot(ControllerRuntime.radialSlot(
+                axis(GLFW.GLFW_GAMEPAD_AXIS_RIGHT_X),
+                axis(GLFW.GLFW_GAMEPAD_AXIS_RIGHT_Y),
+                settings.lookDeadzone));
+            if (pressed(settings, ControllerAction.MENU_CANCEL)) {
+                NeoForgeClientApi.setScreen(client, null);
+                return;
+            }
+            if (released(settings, ControllerAction.RADIAL_MENU)) {
+                int slot = radial.selectedSlot();
+                NeoForgeClientApi.setScreen(client, null);
+                activateRadialSlot(slot);
+            }
+            return;
+        }
+
+        if (screen instanceof NeoForgeControllerSettingsScreen) {
+            ((NeoForgeControllerSettingsScreen)screen).handleControllerInput(CONTROLLER_STATE, settings.triggerDeadzone);
+            return;
+        }
+
         ensureScreenCursor(screen);
         float ry = axis(GLFW.GLFW_GAMEPAD_AXIS_RIGHT_Y);
 
@@ -313,16 +418,13 @@ public final class NeoForgeControllerCompat {
             applySnapTarget(screen, MENU_NAVIGATION.synchronize(screen, cursorX, cursorY));
         }
 
-        if (pressed(GLFW.GLFW_GAMEPAD_BUTTON_BACK)) {
+        if (pressed(settings, ControllerAction.SNAP_FREE_TOGGLE)) {
             takeControllerCursor();
             cursorMode = cursorMode == CursorMode.SNAP ? CursorMode.FREE : CursorMode.SNAP;
             snapStickLatched = false;
             MENU_NAVIGATION.reset(screen);
             if (cursorMode == CursorMode.SNAP) {
                 applySnapTarget(screen, MENU_NAVIGATION.discover(screen, cursorX, cursorY));
-            } else {
-                renderedCursorX = cursorX;
-                renderedCursorY = cursorY;
             }
             NeoForgeControllerLog.log("Menu cursor mode changed to " + cursorMode + " screen=" + screen.getClass().getName());
             return;
@@ -338,7 +440,7 @@ public final class NeoForgeControllerCompat {
             snapStickLatched = false;
         }
 
-        if (pressed(GLFW.GLFW_GAMEPAD_BUTTON_A)) {
+        if (pressed(settings, ControllerAction.MENU_ACCEPT)) {
             takeControllerCursor();
             if (cursorMode == CursorMode.SNAP && MENU_NAVIGATION.usesNativeActivation(screen)) {
                 invokeScreenKeyPressed(screen, GLFW.GLFW_KEY_ENTER, 0, 0);
@@ -346,18 +448,18 @@ public final class NeoForgeControllerCompat {
                 invokeScreenMousePressed(screen, cursorX, cursorY, LEFT_CLICK);
             }
         }
-        if (released(GLFW.GLFW_GAMEPAD_BUTTON_A) &&
+        if (released(settings, ControllerAction.MENU_ACCEPT) &&
             (cursorMode == CursorMode.FREE || !MENU_NAVIGATION.usesNativeActivation(screen))) {
             invokeScreenMouseReleased(screen, cursorX, cursorY, LEFT_CLICK);
         }
-        if (pressed(GLFW.GLFW_GAMEPAD_BUTTON_X)) {
+        if (pressed(settings, ControllerAction.MENU_SECONDARY)) {
             takeControllerCursor();
             invokeScreenMousePressed(screen, cursorX, cursorY, RIGHT_CLICK);
         }
-        if (released(GLFW.GLFW_GAMEPAD_BUTTON_X)) {
+        if (released(settings, ControllerAction.MENU_SECONDARY)) {
             invokeScreenMouseReleased(screen, cursorX, cursorY, RIGHT_CLICK);
         }
-        if (pressed(GLFW.GLFW_GAMEPAD_BUTTON_B)) {
+        if (pressed(settings, ControllerAction.MENU_CANCEL)) {
             takeControllerCursor();
             if (MENU_NAVIGATION.handleBack(screen)) {
                 if (cursorMode == CursorMode.SNAP) {
@@ -368,12 +470,12 @@ public final class NeoForgeControllerCompat {
             }
             return;
         }
-        if (pressed(GLFW.GLFW_GAMEPAD_BUTTON_Y)) {
+        if (pressed(settings, ControllerAction.QUICK_MOVE)) {
             takeControllerCursor();
             quickMoveFocusedSlot(screen);
         }
 
-        if (client.screen != screen) {
+        if (NeoForgeClientApi.screen(client) != screen) {
             return;
         }
 
@@ -398,11 +500,8 @@ public final class NeoForgeControllerCompat {
         if (screen != lastCursorScreen) {
             lastCursorScreen = screen;
             lastScreenCursorNanos = 0L;
-            lastRenderedCursorNanos = 0L;
             cursorX = Math.max(1, screen.width / 2);
             cursorY = Math.max(1, screen.height / 2);
-            renderedCursorX = cursorX;
-            renderedCursorY = cursorY;
             snapStickLatched = false;
             MENU_NAVIGATION.reset(screen);
             if (cursorMode == CursorMode.SNAP) {
@@ -413,8 +512,6 @@ public final class NeoForgeControllerCompat {
         if (cursorX < 0.0 || cursorY < 0.0) {
             cursorX = Math.max(1, screen.width / 2);
             cursorY = Math.max(1, screen.height / 2);
-            renderedCursorX = cursorX;
-            renderedCursorY = cursorY;
         }
     }
 
@@ -449,21 +546,6 @@ public final class NeoForgeControllerCompat {
         invokeScreenMouseMoved(screen, cursorX, cursorY);
     }
 
-    private static void advanceRenderedCursor() {
-        long now = System.nanoTime();
-        double seconds = 1.0 / 60.0;
-        if (lastRenderedCursorNanos != 0L) {
-            seconds = (now - lastRenderedCursorNanos) / 1000000000.0;
-            seconds = clamp(seconds, 0.0, 1.0 / 20.0);
-        }
-        lastRenderedCursorNanos = now;
-        double blend = 1.0 - Math.exp(-18.0 * seconds);
-        renderedCursorX += (cursorX - renderedCursorX) * blend;
-        renderedCursorY += (cursorY - renderedCursorY) * blend;
-        if (Math.abs(renderedCursorX - cursorX) < 0.05) renderedCursorX = cursorX;
-        if (Math.abs(renderedCursorY - cursorY) < 0.05) renderedCursorY = cursorY;
-    }
-
     private static void takeControllerCursor() {
         relayOwnsCursor = false;
     }
@@ -472,6 +554,7 @@ public final class NeoForgeControllerCompat {
         if (client == null || screen == null || !poll()) {
             return;
         }
+
         ensureScreenCursor(screen);
         NeoForgeControllerSettings settings = NeoForgeControllerSettings.get();
         float rawX = axis(GLFW.GLFW_GAMEPAD_AXIS_LEFT_X);
@@ -606,7 +689,7 @@ public final class NeoForgeControllerCompat {
         if (inputKey == null || client == null || client.getWindow() == null) {
             return false;
         }
-        long window = client.getWindow().getWindow();
+        long window = NeoForgeVersionApi.windowHandle(client);
         int code = inputKey.getValue();
         return GLFW.glfwGetKey(window, code) == GLFW.GLFW_PRESS
             || (code >= 0 && code <= GLFW.GLFW_MOUSE_BUTTON_LAST
@@ -614,10 +697,7 @@ public final class NeoForgeControllerCompat {
     }
 
     private static void setSneakInput(LocalPlayer player, boolean sneak) {
-        if (player == null || player.input == null) {
-            return;
-        }
-        player.input.shiftKeyDown = sneak;
+        NeoForgeVersionApi.setSneakInput(player, sneak);
     }
 
     private static void pressKey(KeyMapping key) {
@@ -630,15 +710,98 @@ public final class NeoForgeControllerCompat {
         }
     }
 
+    public static String radialKeyLabel(String keyId) {
+        if (keyId == null || keyId.isEmpty()) return "Empty";
+        KeyMapping key = findKey(keyId);
+        return key == null
+            ? "Missing " + keyId
+            : key.getTranslatedKeyMessage().getString() + " - " + Component.translatable(key.getName()).getString();
+    }
+
+    public static String radialKeyGlyph(String keyId) {
+        if (keyId == null || keyId.isEmpty()) return "+";
+        KeyMapping key = findKey(keyId);
+        if (key == null) return "?";
+        String glyph = key.getTranslatedKeyMessage().getString();
+        return glyph.toLowerCase(java.util.Locale.ROOT).contains("not bound") ? "?" : glyph;
+    }
+
+    public static String[] radialKeyIds() {
+        Minecraft client = Minecraft.getInstance();
+        KeyMapping[] keys = client == null || client.options == null ? null : client.options.keyMappings;
+        if (keys == null || keys.length == 0) return new String[] { "" };
+        String[] ids = new String[keys.length + 1];
+        ids[0] = "";
+        int index = 1;
+        for (KeyMapping key : keys) {
+            if (key != null) ids[index++] = key.getName();
+        }
+        if (index == ids.length) return ids;
+        return java.util.Arrays.copyOf(ids, index);
+    }
+
+    private static KeyMapping findKey(String keyId) {
+        Minecraft client = Minecraft.getInstance();
+        KeyMapping[] keys = client == null || client.options == null ? null : client.options.keyMappings;
+        if (keys == null) return null;
+        for (KeyMapping key : keys) {
+            if (key != null && key.getName().equals(keyId)) return key;
+        }
+        return null;
+    }
+
+    private static void activateRadialSlot(int slot) {
+        if (slot < 0 || slot >= 8) return;
+        KeyMapping key = findKey(NeoForgeControllerSettings.get().radialSlot(slot));
+        if (key == null) return;
+        pressKey(key);
+        key.setDown(true);
+        radialPressedKey = key;
+    }
+
+    private static void releaseRadialKey() {
+        if (radialPressedKey == null) return;
+        radialPressedKey.setDown(isBoundInputHeld(radialPressedKey.getKey()));
+        radialPressedKey = null;
+    }
+
+    private static void tickJavaKeyMappings(Minecraft client, NeoForgeControllerSettings settings, boolean enabled) {
+        java.util.Iterator<java.util.Map.Entry<String, KeyMapping>> activeKeys = JAVA_KEYS_DOWN.entrySet().iterator();
+        while (activeKeys.hasNext()) {
+            java.util.Map.Entry<String, KeyMapping> entry = activeKeys.next();
+            ControllerInput input = settings.javaBinding(entry.getKey());
+            if (enabled && input.held(CONTROLLER_STATE, settings.triggerDeadzone)) continue;
+            entry.getValue().setDown(isBoundInputHeld(entry.getValue().getKey()));
+            activeKeys.remove();
+        }
+        if (!enabled || client.options == null || client.options.keyMappings == null) return;
+        for (KeyMapping key : client.options.keyMappings) {
+            if (key == null) continue;
+            String keyId = key.getName();
+            ControllerInput input = settings.javaBinding(keyId);
+            if (JAVA_KEYS_DOWN.containsKey(keyId) || !input.pressed(CONTROLLER_STATE, settings.triggerDeadzone)) continue;
+            pressKey(key);
+            key.setDown(true);
+            JAVA_KEYS_DOWN.put(keyId, key);
+        }
+    }
+
+    private static void releaseJavaKeyMappings() {
+        for (java.util.Map.Entry<String, KeyMapping> entry : JAVA_KEYS_DOWN.entrySet()) {
+            entry.getValue().setDown(isBoundInputHeld(entry.getValue().getKey()));
+        }
+        JAVA_KEYS_DOWN.clear();
+    }
+
     private static void changeHotbarSlot(LocalPlayer player, int direction) {
         if (player == null) {
             return;
         }
-        int slot = (player.getInventory().selected + direction) % 9;
+        int slot = (NeoForgeVersionApi.selectedHotbarSlot(player) + direction) % 9;
         if (slot < 0) {
             slot += 9;
         }
-        player.getInventory().selected = slot;
+        NeoForgeVersionApi.setSelectedHotbarSlot(player, slot);
     }
 
     private static void quickMoveFocusedSlot(Screen screen) {
@@ -652,7 +815,7 @@ public final class NeoForgeControllerCompat {
         if (slot == null || !slot.hasItem()) {
             return;
         }
-        ((NeoForgeControllerContainerAccessor) container).banditvault$slotClicked(slot, slot.index, 0, ClickType.QUICK_MOVE);
+        NeoForgeVersionApi.quickMove(container, slot);
     }
 
     private static void invokeScreenMouseMoved(Screen screen, double x, double y) {
@@ -660,11 +823,11 @@ public final class NeoForgeControllerCompat {
     }
 
     private static void invokeScreenMousePressed(Screen screen, double x, double y, int button) {
-        screen.mouseClicked(x, y, button);
+        NeoForgeVersionApi.mousePressed(screen, x, y, button);
     }
 
     private static void invokeScreenMouseReleased(Screen screen, double x, double y, int button) {
-        screen.mouseReleased(x, y, button);
+        NeoForgeVersionApi.mouseReleased(screen, x, y, button);
     }
 
     private static void invokeScreenMouseScrolled(Screen screen, double x, double y, double scroll) {
@@ -672,7 +835,7 @@ public final class NeoForgeControllerCompat {
     }
 
     private static boolean invokeScreenKeyPressed(Screen screen, int keyCode, int scanCode, int modifiers) {
-        return screen.keyPressed(keyCode, scanCode, modifiers);
+        return NeoForgeVersionApi.keyPressed(screen, keyCode, scanCode, modifiers);
     }
 
     private static float axis(int index) {
@@ -697,6 +860,18 @@ public final class NeoForgeControllerCompat {
 
     private static boolean released(int index) {
         return CONTROLLER_STATE.released(buttonFor(index));
+    }
+
+    private static boolean button(NeoForgeControllerSettings settings, ControllerAction action) {
+        return settings.binding(action).held(CONTROLLER_STATE, settings.triggerDeadzone);
+    }
+
+    private static boolean pressed(NeoForgeControllerSettings settings, ControllerAction action) {
+        return settings.binding(action).pressed(CONTROLLER_STATE, settings.triggerDeadzone);
+    }
+
+    private static boolean released(NeoForgeControllerSettings settings, ControllerAction action) {
+        return settings.binding(action).released(CONTROLLER_STATE, settings.triggerDeadzone);
     }
 
     private static double shapedCursorAxis(float value, float deadzone) {

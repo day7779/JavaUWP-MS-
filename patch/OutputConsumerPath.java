@@ -1,3 +1,13 @@
+/*
+ * Vendored from tiny-remapper 0.8.2 (https://github.com/FabricMC/tiny-remapper),
+ * which Fabric Loader shades into net.fabricmc.loader.impl.lib.tinyremapper.
+ * build.ps1 rewrites the package back to net.fabricmc.tinyremapper when it
+ * patches the standalone jar.
+ * Licensed under the Apache License, Version 2.0.
+ *
+ * Modified for Xbox UWP: routes source jars through FileSystemReference too,
+ * because the sandbox blocks the ZipFS close-time toRealPath cleanup.
+ */
 package net.fabricmc.loader.impl.lib.tinyremapper;
 
 import java.io.BufferedInputStream;

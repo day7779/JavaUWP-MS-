@@ -52,7 +52,7 @@ MC.Xbox/
 | `ui/launcher_ui` | Main menu rendering and interaction. |
 | `ui/auth_screen` | Sign in screen and QR/device code presentation. |
 | `ui/launcher_mouse` | Loads `mouse_support.dll` and drives the relay cursor in launcher menus and the mod browser. |
-| `mods/mods_browser` | Modrinth search, version resolution, install into active profile. |
+| `mods/mods_browser` | Modrinth search, recommended list loading, version resolution, install into active profile. |
 | `mods/mod_defaults` | Launcher seeded mod compatibility defaults per target. |
 | `profiles/profiles` | Profile CRUD, per profile game dirs, selected launch target. |
 | `net/http_client` | Shared HTTP helpers for downloads and APIs. |
@@ -138,7 +138,7 @@ NeoForge generates patched client artifacts on first launch from downloaded offi
 
 ### Forge
 
-`launch/loaders/forge.cpp` implements the experimental `1.20.1 + Forge 47.4.20` provider. It follows the same loader hook pattern as NeoForge:
+`launch/loaders/forge.cpp` implements the experimental Forge provider. It follows the same loader hook pattern as NeoForge:
 
 - Reads Forge install metadata from the generated download manifest.
 - Prepares SRG client artifacts from downloaded official inputs (similar to NeoForge patched client generation).
@@ -147,7 +147,7 @@ NeoForge generates patched client artifacts on first launch from downloaded offi
 
 Forge patched client jars are generated locally during build or first launch prep from official inputs. Do not commit or redistribute generated Forge client jars.
 
-Other Forge catalog rows (for example `1.18.2`) may exist in `config/versions.tsv` before their providers are implemented.
+Modern Forge controller targets from 1.21 through 26.2 reuse the NeoForge shared source with a Forge entrypoint. Minecraft 1.21.2 has no Forge row because no matching loader was published. Older catalog rows may still exist before their controller providers are implemented.
 
 To add another Forge target:
 
@@ -156,9 +156,15 @@ To add another Forge target:
 3. Ensure `build.ps1` generates the matching manifest and any per target controller mod jar.
 4. Confirm dispatch in `launch/loaders/loader.cpp` covers the new loader version.
 
-## Mouse Relay
+## Relay
 
-Xbox UWP does not expose a real mouse, so mouse input comes from an optional relay. `mouse_support.dll` (built from `mouse_support/`) is the single mouse source: it owns the UDP listener and exposes frames through a small C API. The GLFW shim links it for in game mouse input, and the launcher loads it through `ui/launcher_mouse` to drive the cursor in menus and the mod browser. Input can come from the native Bandit Mouse Relay app in `tools/mouse-relay/` (Windows and Android, UDP `7331`) or from `net/web_relay_server`, which serves a browser touchpad on port `6090` so any phone or PC can relay without installing an app.
+Xbox UWP does not expose a real mouse, so mouse input comes from an optional relay. `mouse_support.dll` (built from `mouse_support/`) is the single mouse source: it owns the UDP listener and exposes frames through a small C API. The GLFW shim links it for in game mouse input, and the launcher loads it through `ui/launcher_mouse` to drive the cursor in menus and the mod browser. Input can come from the native Bandit Relay app in `tools/relay/` (Windows, Android and iOS, UDP `42731`) or from `net/web_relay_server`, which serves a browser touchpad on port `6090` so any phone or PC can relay without installing an app. The listener answers `ping` with a `javauwp_glfw_mouse:ready` line, which is what the app uses to find the console on the network without a typed address, and that line carries `mic=1` so the app knows the mic receiver is available.
+
+## Mic Relay
+
+Xbox UWP has no usable capture device for the in game JVM: it runs headless with a patched `java.desktop`, and the native `javax.sound.sampled` providers do not load in the sandbox, so Simple Voice Chat sees an empty microphone list. `mic_relay/` builds `relay-mic.jar`, a pure Java `javax.sound.sampled` service provider (a `MixerProvider` exposing one virtual `TargetDataLine`) with no driver and no native code. `launch/minecraft_launch` adds the jar to the Fabric game classpath so the JVM `AudioSystem` enumerates it and Simple Voice Chat can select `Bandit Relay Microphone`. Forge and NeoForge cannot see the app classpath from their module layer, so those targets get the same provider classes as a bundled `lowcodefml` mod (`bandit_mic_relay`) placed in `runtime/version-mods/<target-id>/` and synced into the profile `mods/` folder at launch. Audio arrives as UDP on `42733` from the Bandit Relay app in `tools/relay/` (a phone or PC), the same shape as the mouse relay. Format is 48 kHz mono signed 16-bit; the line blocks briefly and fills silence on underrun so voice chat never stalls.
+
+The reverse direction is the audio relay: `audio_relay/` builds `audio_relay.exe`, a WASAPI loopback helper packaged with the launcher and started by `launch/minecraft_launch` at game launch (kill-on-close job object). The Bandit Relay app subscribes by sending `BMAS` keepalives to UDP `42734` and receives the console's game audio as s16le packets, which it plays on the phone or PC. The console needs no audio configuration.
 
 ## Build Time vs Runtime Configuration
 
@@ -195,6 +201,7 @@ Changing the default target requires updating `scripts/config.ps1` and usually `
 | Change main menu or auth UI | `ui/launcher_ui.cpp`, `ui/auth_screen` |
 | Change downloads or repair behavior | `launch/runtime_manager.cpp` |
 | Change Modrinth install behavior | `mods/mods_browser.cpp` |
+| Change recommended mods | `config/recommended-mods.json` |
 | Change remote uploads | `net/remote_file_server.cpp` |
 | Change relay mouse behavior | `mouse_support/`, `glfw_shim/glfw_uwp.cpp`, `ui/launcher_mouse.cpp`, `net/web_relay_server.cpp` |
 

@@ -1,4 +1,4 @@
-﻿#ifndef WIN32_LEAN_AND_MEAN
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
@@ -34,6 +34,7 @@
 #include "loader.h"
 #include "runtime_manager.h"
 #include "minecraft_launch.h"
+#include "telemetry.h"
 
 // ICoreWindowInterop is forward-declared without a GUID, so IID_PPV_ARGS
 // cannot use it directly. Redeclare it with the correct uuid here.
@@ -90,6 +91,22 @@ bool CoreWindowAcceptsInput() {
     return changed == 0 || (static_cast<unsigned long long>(GetTickCount64()) - changed) >= 250ULL;
 }
 
+// stops an os suspend from being reported as a crash
+static void MarkLaunchSuspendedIfRunning() {
+    const std::wstring runtimeRoot = GetEnvVarString(L"MC_RUNTIME_DIR");
+    if (runtimeRoot.empty()) return;
+    if (GetFileAttributesW(CrashLaunchMarkerPath(runtimeRoot).c_str()) == INVALID_FILE_ATTRIBUTES) return;
+    if (!WriteTextFile(LaunchSuspendedMarkerPath(runtimeRoot), L"suspended\n")) {
+        WriteLog(L"Minecraft suspension marker could not be written");
+    }
+}
+
+static void ClearLaunchSuspendedMarker() {
+    const std::wstring runtimeRoot = GetEnvVarString(L"MC_RUNTIME_DIR");
+    if (runtimeRoot.empty()) return;
+    DeleteFileW(LaunchSuspendedMarkerPath(runtimeRoot).c_str());
+}
+
 static void RegisterLifecycleHandlers(ICoreApplication* coreApp) {
     if (!coreApp) return;
 
@@ -98,6 +115,8 @@ static void RegisterLifecycleHandlers(ICoreApplication* coreApp) {
         Callback<IEventHandler<SuspendingEventArgs*>>(
             [](IInspectable*, ISuspendingEventArgs*) -> HRESULT {
                 LogLifecycleEvent(L"CoreApplication Suspending");
+                MarkLaunchSuspendedIfRunning();
+                telemetry::QueueSuspend();
                 return S_OK;
             }).Get(),
         &token);
@@ -109,6 +128,7 @@ static void RegisterLifecycleHandlers(ICoreApplication* coreApp) {
         Callback<IEventHandler<IInspectable*>>(
             [](IInspectable*, IInspectable*) -> HRESULT {
                 WriteLog(L"CoreApplication Resuming");
+                ClearLaunchSuspendedMarker();
                 return S_OK;
             }).Get(),
         &token);
@@ -222,6 +242,89 @@ static bool WriteHwndFile(const std::wstring& dir, HWND hwnd) {
     fclose(hf);
     return true;
 }
+
+static void LogPlatformBudget() {
+    unsigned long long limitMb = 0;
+    unsigned long long usedMb = 0;
+    if (ReadAppMemoryBudget(limitMb, usedMb)) {
+        WriteLogF(L"app memory budget: %llu MB limit, %llu MB in use", limitMb, usedMb);
+    } else {
+        WriteLog(L"app memory budget: unavailable");
+    }
+
+    SYSTEM_INFO info = {};
+    GetNativeSystemInfo(&info);
+    // GetActiveProcessorCount is desktop partition only and this builds as WINAPI_FAMILY_APP
+    DWORD_PTR mask = info.dwActiveProcessorMask;
+    int active = 0;
+    while (mask) {
+        active += (int)(mask & 1);
+        mask >>= 1;
+    }
+    WriteLogF(L"processors: %u reported, %d in active mask", info.dwNumberOfProcessors, active);
+}
+
+static void ApplyMesaEnvOverrides(const std::wstring& exeDir) {
+    const std::wstring path = exeDir + L"\\mesa_env.txt";
+    if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        const std::wstring tpl =
+            L"# Mesa environment overrides, applied before the GLFW shim loads Mesa.\n"
+            L"# One NAME=VALUE per line. Lines starting with # are ignored.\n"
+            L"#\n"
+            L"# These are set after the launcher's own, so anything here wins. Already set:\n"
+            L"#   mesa_glthread=true\n"
+            L"#   MESA_SHADER_CACHE_DIR, MESA_SHADER_CACHE_MAX_SIZE=1G\n"
+            L"#\n"
+            L"# Check mc_launch.log for \"mesa_env.txt applying:\" to confirm what was picked up.\n"
+            L"\n"
+            L"# Overlay live GPU stats. Two rows, one graph per row, comma separates columns.\n"
+            L"# Start here, then add counters once you know what you are looking for.\n"
+            L"#GALLIUM_HUD=fps,frametime;draw-calls,num-bytes-uploaded\n"
+            L"\n"
+            L"# Bigger text if 1080p on a TV makes the default unreadable.\n"
+            L"#GALLIUM_HUD_SCALE=2\n"
+            L"\n"
+            L"# Log every shader cache miss. Use this to prove the disk cache is working,\n"
+            L"# a miss on every new chunk would explain stutter that is not GC.\n"
+            L"#MESA_SHADER_CACHE_DISABLE=false\n"
+            L"#MESA_GLSL_CACHE_DISABLE=false\n"
+            L"\n"
+            L"# Turn glthread off to see whether it is helping or hurting on this hardware.\n"
+            L"#mesa_glthread=false\n";
+        if (WriteTextFile(path, tpl)) {
+            WriteLogF(L"mesa_env.txt seeded at %s", path.c_str());
+        }
+    }
+
+    std::wstring text;
+    if (!ReadTextFile(path, text)) {
+        WriteLogF(L"mesa_env.txt not present at %s, using built in mesa settings only", path.c_str());
+        return;
+    }
+
+    int applied = 0;
+    size_t pos = 0;
+    while (pos < text.size()) {
+        size_t end = text.find(L'\n', pos);
+        if (end == std::wstring::npos) end = text.size();
+        const std::wstring line = TrimWhitespace(text.substr(pos, end - pos));
+        pos = end + 1;
+
+        if (line.empty() || line[0] == L'#') continue;
+        const size_t eq = line.find(L'=');
+        if (eq == std::wstring::npos || eq == 0) {
+            WriteLogF(L"mesa_env.txt ignoring line, not NAME=VALUE: %s", line.c_str());
+            continue;
+        }
+        const std::wstring name = TrimWhitespace(line.substr(0, eq));
+        const std::wstring value = TrimWhitespace(line.substr(eq + 1));
+        SetEnvironmentVariableW(name.c_str(), value.c_str());
+        WriteLogF(L"mesa_env.txt applying: %s=%s", name.c_str(), value.c_str());
+        ++applied;
+    }
+    WriteLogF(L"mesa_env.txt applied %d override(s) from %s", applied, path.c_str());
+}
+
 class App : public RuntimeClass<RuntimeClassFlags<WinRtClassicComMix>, IFrameworkView>
 {
 public:
@@ -330,9 +433,24 @@ public:
         EnsureDirectoryTree(g_logDir);
         ArchiveCurrentLogsToPrevious(exeDir);
         EnsureDirectoryTree(g_logDir);
+
+        // has to run before anything logs
+        {
+            wchar_t lp[MAX_PATH];
+            swprintf_s(lp, L"%s\\mc_launch.log", g_logDir.c_str());
+            // capture the crash sources before the archive removes them
+            telemetry::PrepareHardCrash(exeDir);
+            ArchivePreviousCrashIfNeeded(exeDir);
+            FILE* clf = nullptr;
+            _wfopen_s(&clf, lp, L"w");
+            if (clf) fclose(clf);
+        }
+
         SetCurrentDirectoryW(exeDir.c_str());
         SetEnvironmentVariableW(L"MC_RUNTIME_DIR", exeDir.c_str());
         SetEnvironmentVariableW(L"MC_LOG_DIR", g_logDir.c_str());
+        telemetry::ReportHardCrash(exeDir);
+        telemetry::FlushQueueAsync();
         const std::wstring graphicsRuntime = DetectGraphicsRuntimeName();
         SetEnvironmentVariableW(L"MC_GRAPHICS_RUNTIME", graphicsRuntime.c_str());
         SetEnvironmentVariableW(L"mesa_glthread", L"true");
@@ -344,16 +462,11 @@ public:
             WriteLogF(L"mesa shader cache dir=%s", mesaCacheDir.c_str());
         }
         WriteLog(L"mesa_glthread enabled");
-
-        wchar_t lp[MAX_PATH];
-        swprintf_s(lp, L"%s\\mc_launch.log", g_logDir.c_str());
-        ArchivePreviousCrashIfNeeded(exeDir);
-        FILE* clf = nullptr;
-        _wfopen_s(&clf, lp, L"w");
-        if (clf) fclose(clf);
+        ApplyMesaEnvOverrides(exeDir);
 
         WriteLog(L"=== MC.App Run() started ===");
         WriteLogF(L"graphicsRuntime=%s", graphicsRuntime.c_str());
+        LogPlatformBudget();
         WriteLogF(L"SetWindow called=%d", g_setWindowCalled ? 1 : 0);
         WriteLogF(L"SetWindow QueryInterface hr=0x%08X", g_windowInteropHr);
         WriteLogF(L"SetWindow get_WindowHandle hr=0x%08X", g_getWindowHandleHr);
@@ -420,6 +533,10 @@ public:
                 unsupportedDetail += L"its download manifest is missing from the installed package. Rebuild/reinstall the launcher with per-version manifests enabled.";
             } else if (selectedInfo.assetIndex.empty() || selectedInfo.launchVersion.empty() || selectedInfo.mainClass.empty()) {
                 unsupportedDetail += L"its download manifest is incomplete. Reinstall the latest launcher build.";
+            } else if (!selectedInfo.missingBundledModsDir.empty()) {
+                unsupportedDetail += L"its bundled mods are missing from the installed package. Expected " +
+                    selectedInfo.missingBundledModsDir +
+                    L". Rebuild without -SkipVersionCompat and reinstall.";
             } else {
                 unsupportedDetail += L"its launch provider is not available in this build yet.";
             }

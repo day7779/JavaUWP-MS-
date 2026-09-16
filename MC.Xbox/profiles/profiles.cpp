@@ -1,4 +1,4 @@
-﻿#include "profiles.h"
+#include "profiles.h"
 
 #include "launcher_common.h"
 #include "runtime_config.h"
@@ -14,6 +14,7 @@
 
 const wchar_t kVanillaProfileId[] = L"vanilla";
 
+// GetNamedValue throws on a type mismatch, so each of these returns its default
 static std::wstring JsonStringOrEmpty(const winrt::Windows::Data::Json::JsonObject& obj, const wchar_t* key) {
     using namespace winrt::Windows::Data::Json;
     if (!key || !obj.HasKey(key)) return {};

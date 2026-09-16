@@ -1,4 +1,4 @@
-﻿#include "launcher_ui.h"
+#include "launcher_ui.h"
 
 #include "mods_browser.h"
 #include "auth_screen.h"
@@ -9,6 +9,7 @@
 #include "profiles.h"
 #include "remote_file_server.h"
 #include "qr_code.h"
+#include "telemetry.h"
 
 #include <chrono>
 #include <thread>
@@ -194,6 +195,331 @@ static void ShowRemoteFilesPage(ICoreWindow* window, AuthScreenRenderer* rendere
     }
 }
 
+static std::wstring CrashHeadline(const telemetry::CrashRecord& record) {
+    if (record.repeatCount >= 3) {
+        return L"Minecraft has crashed " + std::to_wstring(record.repeatCount) + L" launches in a row";
+    }
+    if (record.exception.find(L"unknown_") != std::wstring::npos) {
+        return L"Minecraft closed unexpectedly";
+    }
+    if (record.phase == L"mod_load") return L"Minecraft crashed while loading mods";
+    if (record.phase == L"jvm_init") return L"Minecraft crashed while starting up";
+    if (record.phase == L"ingame") return L"Minecraft crashed while playing";
+    return L"Minecraft closed unexpectedly";
+}
+
+static std::wstring CrashSuspectLine(const telemetry::CrashRecord& record) {
+    if (!record.suspectedMod.empty()) {
+        std::wstring line = L"Suspected: " + record.suspectedMod;
+        if (!record.detail.targetMethod.empty()) {
+            line += L"\nIt asked for something this version of Minecraft does not have.";
+        }
+        return line;
+    }
+    if (!record.detail.symbol.empty()) {
+        return L"A mod asked for " + a2w(record.detail.symbol.c_str()) +
+            L", which this console's graphics layer does not provide.\nThis points to the launcher's graphics layer.";
+    }
+    if (record.exception.find(L"unknown_") != std::wstring::npos) {
+        return L"Nothing readable was left behind, so there is no diagnosis for this one.";
+    }
+    if (!record.message.empty()) return record.message;
+    return record.exception;
+}
+
+static std::wstring CrashTraceText(const telemetry::CrashRecord& record) {
+    std::wstring text = record.exception;
+    if (!record.message.empty()) text += L"\n" + record.message;
+    text += L"\n";
+    for (const std::wstring& frame : record.frames) {
+        text += L"\n  at " + frame;
+    }
+    if (record.frames.empty()) text += L"\nNo stack trace was recovered.";
+    text += L"\n\nfingerprint " + record.fingerprint;
+    text += L"\nbuild " + record.launcherBuild + L", " + record.mcVersion + L" " + record.loader;
+    if (!record.zip.empty()) {
+        text += L"\n\nThe full logs are zipped at:\n" + record.zip +
+            L"\nOpen Remote Files on the main menu to read it on a phone or PC.";
+    }
+    return text;
+}
+
+static void ShowCrashScreen(ICoreWindow* window, AuthScreenRenderer* renderer, AuthUiState& state) {
+    const telemetry::CrashRecord record = telemetry::ReadLastCrash();
+    if (!record.found) return;
+
+    WriteLogF(L"Crash screen shown for %s, repeat %d",
+        record.fingerprint.c_str(), record.repeatCount);
+
+    const bool showConsent =
+        telemetry::Configured() && telemetry::Consent() == telemetry::ConsentState::Unanswered;
+
+    const bool wasShowingMenu = state.showMainMenu;
+    state.showMainMenu = false;
+    state.showModsPage = false;
+    state.showRemoteFiles = false;
+    state.showDeviceCode = false;
+    state.showCrashScreen = true;
+    state.crashHeadline = CrashHeadline(record);
+    state.crashSuspectLine = CrashSuspectLine(record);
+    state.crashTrace = CrashTraceText(record);
+    state.crashConsentPayload = telemetry::ConsentPayloadPreview(record);
+    state.crashAskConsent = showConsent;
+    state.crashDetailsOpen = false;
+    state.crashDetailScroll = 0;
+    state.crashSelected = 0;
+    state.crashButtonCount = showConsent ? 3 : 2;
+    state.crashFootnote = showConsent
+        ? L"You can change this later, and reading the crash never sends anything."
+        : L"Press B or select Dismiss to carry on.";
+
+    bool leftWas = false;
+    bool rightWas = false;
+    bool selectWas = false;
+    bool backWas = false;
+    bool upWas = false;
+    bool downWas = false;
+
+    while (true) {
+        state.animation = static_cast<float>((GetTickCount64() % 100000) / 1000.0);
+        RenderAuth(renderer, state);
+
+        LauncherMouse& mouse = LauncherMouseInstance();
+        int clicked = -1;
+        if (mouse.Visible() && mouse.TakeClick()) {
+            const int hit = renderer->HitTest(mouse.X(), mouse.Y());
+            if (hit >= launchhit::kCrashButtonBase && hit < launchhit::kCrashButtonBase + 3) {
+                clicked = hit - launchhit::kCrashButtonBase;
+            }
+        }
+
+        const bool leftDown = AnyVirtualKeyDown(window, {
+            ABI::Windows::System::VirtualKey_Left,
+            ABI::Windows::System::VirtualKey_GamepadDPadLeft,
+            ABI::Windows::System::VirtualKey_GamepadLeftThumbstickLeft
+        });
+        const bool rightDown = AnyVirtualKeyDown(window, {
+            ABI::Windows::System::VirtualKey_Right,
+            ABI::Windows::System::VirtualKey_GamepadDPadRight,
+            ABI::Windows::System::VirtualKey_GamepadLeftThumbstickRight
+        });
+        const bool upDown = AnyVirtualKeyDown(window, {
+            ABI::Windows::System::VirtualKey_Up,
+            ABI::Windows::System::VirtualKey_GamepadDPadUp,
+            ABI::Windows::System::VirtualKey_GamepadLeftThumbstickUp
+        });
+        const bool downDown = AnyVirtualKeyDown(window, {
+            ABI::Windows::System::VirtualKey_Down,
+            ABI::Windows::System::VirtualKey_GamepadDPadDown,
+            ABI::Windows::System::VirtualKey_GamepadLeftThumbstickDown
+        });
+        const bool selectDown = AnyVirtualKeyDown(window, {
+            ABI::Windows::System::VirtualKey_Enter,
+            ABI::Windows::System::VirtualKey_Space,
+            ABI::Windows::System::VirtualKey_GamepadA
+        });
+        const bool backDown = AnyVirtualKeyDown(window, {
+            ABI::Windows::System::VirtualKey_Escape,
+            ABI::Windows::System::VirtualKey_GamepadB
+        });
+
+        if (leftDown && !leftWas && state.crashButtonCount > 0) {
+            state.crashSelected = (state.crashSelected + state.crashButtonCount - 1) % state.crashButtonCount;
+        }
+        if (rightDown && !rightWas && state.crashButtonCount > 0) {
+            state.crashSelected = (state.crashSelected + 1) % state.crashButtonCount;
+        }
+        if (upDown && !upWas && state.crashDetailScroll > 0) --state.crashDetailScroll;
+        if (downDown && !downWas) {
+            const std::wstring& body = state.crashDetailsOpen
+                ? state.crashTrace
+                : state.crashConsentPayload;
+            int lines = 1;
+            for (const wchar_t ch : body) {
+                if (ch == L'\n') ++lines;
+            }
+            if (state.crashDetailScroll < lines - 4) ++state.crashDetailScroll;
+        }
+
+        if (backDown && !backWas) break;
+
+        const int pressed = clicked >= 0 ? clicked : ((selectDown && !selectWas) ? state.crashSelected : -1);
+        if (pressed < 0) {
+            leftWas = leftDown;
+            rightWas = rightDown;
+            upWas = upDown;
+            downWas = downDown;
+            selectWas = selectDown;
+            backWas = backDown;
+            std::this_thread::sleep_for(std::chrono::milliseconds(16));
+            continue;
+        }
+
+        if (state.crashAskConsent) {
+            if (pressed == 0) {
+                telemetry::SendLastCrashOnce(record);
+                state.crashFootnote = L"Sending this one report. Reporting stays off.";
+            } else if (pressed == 1) {
+                if (telemetry::SetConsent(telemetry::ConsentState::Always)) {
+                    telemetry::SendLastCrashOnce(record);
+                    telemetry::FlushQueueAsync();
+                    state.crashFootnote = L"Reporting is on. Turn it off any time from Settings.";
+                } else {
+                    state.crashFootnote = L"Reporting could not be turned on. Nothing was sent.";
+                }
+            } else {
+                if (telemetry::SetConsent(telemetry::ConsentState::Never)) {
+                    telemetry::ClearQueue();
+                    state.crashFootnote = L"Nothing will be sent. Crashes are still explained here.";
+                } else {
+                    state.crashFootnote = L"Reporting could not be turned off.";
+                }
+            }
+            state.crashAskConsent = false;
+            state.crashSelected = 0;
+            state.crashButtonCount = 2;
+            state.crashDetailScroll = 0;
+        } else if (pressed == 0) {
+            state.crashDetailsOpen = !state.crashDetailsOpen;
+            state.crashDetailScroll = 0;
+        } else {
+            break;
+        }
+
+        leftWas = leftDown;
+        rightWas = rightDown;
+        upWas = upDown;
+        downWas = downDown;
+        selectWas = selectDown;
+        backWas = backDown;
+        std::this_thread::sleep_for(std::chrono::milliseconds(16));
+    }
+
+    telemetry::ClearLastCrash();
+
+    // wait for release before the menu resets its edge detection
+    while (AnyVirtualKeyDown(window, {
+        ABI::Windows::System::VirtualKey_Enter,
+        ABI::Windows::System::VirtualKey_Space,
+        ABI::Windows::System::VirtualKey_GamepadA,
+        ABI::Windows::System::VirtualKey_Escape,
+        ABI::Windows::System::VirtualKey_GamepadB
+    })) {
+        RenderAuth(renderer, state);
+        std::this_thread::sleep_for(std::chrono::milliseconds(16));
+    }
+
+    state.showCrashScreen = false;
+    state.showMainMenu = wasShowingMenu;
+    WriteLog(L"Crash screen dismissed");
+}
+
+static void ShowSettingsPage(ICoreWindow* window, AuthScreenRenderer* renderer, AuthUiState& state) {
+    constexpr int kSettingsRows = 2;
+    WriteLog(L"Settings page opened");
+
+    state.showMainMenu = false;
+    state.showModsPage = false;
+    state.showRemoteFiles = false;
+    state.showDeviceCode = false;
+    state.showSettings = true;
+    state.settingsSelected = 0;
+    state.settingsNote.clear();
+    state.settingsConfigured = telemetry::Configured();
+    state.settingsReportingOn = telemetry::ConsentGranted();
+    state.settingsInstallId = telemetry::InstallIdText();
+
+    bool upWas = false;
+    bool downWas = false;
+    bool selectWas = false;
+    bool backWas = false;
+
+    while (true) {
+        state.animation = static_cast<float>((GetTickCount64() % 100000) / 1000.0);
+        RenderAuth(renderer, state);
+
+        LauncherMouse& mouse = LauncherMouseInstance();
+        int clicked = -1;
+        bool clickedBack = false;
+        if (mouse.Visible() && mouse.TakeClick()) {
+            const int hit = renderer->HitTest(mouse.X(), mouse.Y());
+            if (hit == launchhit::kBack) clickedBack = true;
+            if (hit >= launchhit::kSettingsRowBase && hit < launchhit::kSettingsRowBase + 2) {
+                clicked = hit - launchhit::kSettingsRowBase;
+            }
+        }
+
+        const bool upDown = AnyVirtualKeyDown(window, {
+            ABI::Windows::System::VirtualKey_Up,
+            ABI::Windows::System::VirtualKey_GamepadDPadUp,
+            ABI::Windows::System::VirtualKey_GamepadLeftThumbstickUp
+        });
+        const bool downDown = AnyVirtualKeyDown(window, {
+            ABI::Windows::System::VirtualKey_Down,
+            ABI::Windows::System::VirtualKey_GamepadDPadDown,
+            ABI::Windows::System::VirtualKey_GamepadLeftThumbstickDown
+        });
+        const bool selectDown = AnyVirtualKeyDown(window, {
+            ABI::Windows::System::VirtualKey_Enter,
+            ABI::Windows::System::VirtualKey_Space,
+            ABI::Windows::System::VirtualKey_GamepadA
+        });
+        const bool backDown = AnyVirtualKeyDown(window, {
+            ABI::Windows::System::VirtualKey_Escape,
+            ABI::Windows::System::VirtualKey_GamepadB
+        });
+
+        if (upDown && !upWas) {
+            state.settingsSelected = (state.settingsSelected + kSettingsRows - 1) % kSettingsRows;
+        }
+        if (downDown && !downWas) {
+            state.settingsSelected = (state.settingsSelected + 1) % kSettingsRows;
+        }
+
+        if ((backDown && !backWas) || clickedBack) break;
+
+        const int pressed = clicked >= 0 ? clicked : ((selectDown && !selectWas) ? state.settingsSelected : -1);
+        if (pressed == 0) {
+            const bool turnOn = !state.settingsReportingOn;
+            if (telemetry::SetConsent(turnOn ? telemetry::ConsentState::Always : telemetry::ConsentState::Never)) {
+                state.settingsReportingOn = turnOn;
+                if (turnOn) {
+                    telemetry::FlushQueueAsync();
+                    state.settingsNote = L"Reporting is on. Anything waiting will be retried.";
+                } else {
+                    telemetry::ClearQueue();
+                    state.settingsNote = L"Reporting is off. Pending reports were deleted.";
+                }
+            } else {
+                state.settingsNote = turnOn
+                    ? L"Reporting could not be turned on."
+                    : L"Reporting could not be turned off.";
+            }
+        } else if (pressed == 1) {
+            if (telemetry::ResetInstallId()) {
+                state.settingsInstallId = telemetry::InstallIdText();
+                state.settingsNote = L"A new reporting id was created.";
+            } else {
+                state.settingsNote = L"The reporting id could not be reset.";
+            }
+        }
+
+        upWas = upDown;
+        downWas = downDown;
+        selectWas = selectDown;
+        backWas = backDown;
+        std::this_thread::sleep_for(std::chrono::milliseconds(16));
+    }
+
+    state.showSettings = false;
+    state.showMainMenu = true;
+    state.status = telemetry::ConsentGranted()
+        ? L"Crash reporting is on"
+        : L"Crash reporting is off";
+    state.detail = L"";
+    WriteLog(L"Settings page closed");
+}
+
 MainMenuAction ShowMainMenu(ICoreWindow* window, const LaunchAuthConfig& authConfig, const std::wstring& runtimeRoot) {
     AuthScreenRenderer rendererInstance;
     AuthScreenRenderer* renderer = nullptr;
@@ -221,6 +547,8 @@ MainMenuAction ShowMainMenu(ICoreWindow* window, const LaunchAuthConfig& authCon
     bool upWasDown = false;
     bool downWasDown = false;
     bool selectWasDown = false;
+
+    ShowCrashScreen(window, renderer, state);
 
     WriteLog(L"Main menu opened");
     while (true) {
@@ -260,11 +588,11 @@ MainMenuAction ShowMainMenu(ICoreWindow* window, const LaunchAuthConfig& authCon
         });
 
         if (upDown && !upWasDown) {
-            selected = (selected + 4) % 5;
+            selected = (selected + kMainMenuItems - 1) % kMainMenuItems;
             state.detail = L"";
         }
         if (downDown && !downWasDown) {
-            selected = (selected + 1) % 5;
+            selected = (selected + 1) % kMainMenuItems;
             state.detail = L"";
         }
         const bool mouseClicked = mouse.TakeClick();
@@ -282,6 +610,9 @@ MainMenuAction ShowMainMenu(ICoreWindow* window, const LaunchAuthConfig& authCon
                 WriteLog(L"Main menu: Remote files selected");
                 ShowRemoteFilesPage(window, renderer, state, runtimeRoot);
             } else if (selected == 3) {
+                WriteLog(L"Main menu: Settings selected");
+                ShowSettingsPage(window, renderer, state);
+            } else if (selected == 4) {
                 WriteLog(L"Main menu: Repair downloads selected");
                 StopRemoteFileServer();
                 state.status = L"Repairing downloaded files";
@@ -433,4 +764,3 @@ bool ResolveLaunchAuthConfig(ICoreWindow* window, LaunchAuthConfig& out) {
     SleepWithAuthUi(renderer, state, 5000);
     return false;
 }
-

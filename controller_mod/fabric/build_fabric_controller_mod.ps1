@@ -15,7 +15,28 @@ $controllerCoreJava = Join-Path $root "controller_mod\core\src\main\java"
 if (-not $MinecraftVersion) { $MinecraftVersion = $ProjectConfig.MinecraftVersion }
 if (-not $LoaderVersion) { $LoaderVersion = $ProjectConfig.FabricLoaderVersion }
 
-$supportedVersions = @("1.16.5", "1.19.2", "1.20.1", "1.20.4", "1.21.1", "1.21.4", "1.21.11")
+$variantRootDir = Join-Path $PSScriptRoot "src\variants"
+$variantLayers = @{
+    "1.20.1" = @("1.20.1")
+    "1.20.4" = @("1.20.4", "1.20.1")
+    "1.21" = @("1.21", "1.20.4", "1.20.1")
+    "1.21.1" = @("1.21.1", "1.21", "1.20.4", "1.20.1")
+    "1.21.2" = @("1.21.4", "1.21", "1.20.4", "1.20.1")
+    "1.21.3" = @("1.21.4", "1.21", "1.20.4", "1.20.1")
+    "1.21.4" = @("1.21.4", "1.21", "1.20.4", "1.20.1")
+    "1.21.5" = @("1.21.5", "1.21.4", "1.21", "1.20.4", "1.20.1")
+    "1.21.6" = @("1.21.6", "1.21.5", "1.21.4", "1.21", "1.20.4", "1.20.1")
+    "1.21.7" = @("1.21.6", "1.21.5", "1.21.4", "1.21", "1.20.4", "1.20.1")
+    "1.21.8" = @("1.21.6", "1.21.5", "1.21.4", "1.21", "1.20.4", "1.20.1")
+    "1.21.9" = @("1.21.11", "1.21.4", "1.21", "1.20.4", "1.20.1")
+    "1.21.10" = @("1.21.11", "1.21.4", "1.21", "1.20.4", "1.20.1")
+    "1.21.11" = @("1.21.11", "1.21.4", "1.21", "1.20.4", "1.20.1")
+    "26.1" = @("26.1", "26.2", "1.21.11", "1.21.4", "1.21", "1.20.4", "1.20.1")
+    "26.1.1" = @("26.1", "26.2", "1.21.11", "1.21.4", "1.21", "1.20.4", "1.20.1")
+    "26.1.2" = @("26.1", "26.2", "1.21.11", "1.21.4", "1.21", "1.20.4", "1.20.1")
+    "26.2" = @("26.2", "1.21.11", "1.21.4", "1.21", "1.20.4", "1.20.1")
+}
+$supportedVersions = @($variantLayers.Keys)
 if ($supportedVersions -notcontains $MinecraftVersion) {
     throw "Fabric controller mod sources currently support Minecraft $($supportedVersions -join ', '). Add a controller variant before bundling $MinecraftVersion."
 }
@@ -26,95 +47,101 @@ $jarName = "banditvault-fabric-controller-1.0.0.jar"
 $jarPath = Join-Path $buildRoot $jarName
 $gameDir = Get-ConfigPath "GameDir"
 
-$javaHome = Resolve-JavaHome
+$javaHome = Resolve-JavaHomeForMinecraft -MinecraftVersion $MinecraftVersion
+$java = Join-Path $javaHome "bin\java.exe"
 $javac = Join-Path $javaHome "bin\javac.exe"
 $jar = Join-Path $javaHome "bin\jar.exe"
-$mixinVersion = $ProjectConfig.MixinVersion
-$mixinJar = Join-Path $gameDir "libraries\net\fabricmc\sponge-mixin\$mixinVersion\sponge-mixin-$mixinVersion.jar"
-$clientJar = Join-Path $gameDir ".fabric\remappedJars\minecraft-$MinecraftVersion-$LoaderVersion\client-intermediary.jar"
+$mixinJar = Resolve-SpongeMixinJar -GameDir $gameDir -MinecraftVersion $MinecraftVersion -LoaderVersion $LoaderVersion
+$clientJar = Resolve-FabricClientJar -GameDir $gameDir -MinecraftVersion $MinecraftVersion -LoaderVersion $LoaderVersion
 if (-not (Test-Path $clientJar)) {
-    Write-Host "Remapped client jar missing for $MinecraftVersion-${LoaderVersion}; preparing Fabric cache."
-    & (Join-Path $root "scripts\prepare-ci-cache.ps1") `
+    Write-Host "Client jar missing for $MinecraftVersion-${LoaderVersion}; preparing Fabric cache."
+    & (Join-Path $root "scripts\setup.ps1") `
         -MinecraftVersion $MinecraftVersion `
         -FabricLoaderVersion $LoaderVersion
+    $clientJar = Resolve-FabricClientJar -GameDir $gameDir -MinecraftVersion $MinecraftVersion -LoaderVersion $LoaderVersion
 }
+
 if (-not (Test-Path $clientJar)) {
-    throw "Remapped client jar not found for $MinecraftVersion-${LoaderVersion}: $clientJar."
+    throw "Client jar not found for $MinecraftVersion-${LoaderVersion}: $clientJar."
 }
 
-Remove-Item -Recurse -Force $buildRoot -ErrorAction SilentlyContinue
-New-Item -ItemType Directory -Force -Path $classesDir | Out-Null
-
-function Test-MinecraftVersionAtLeast {
-    param(
-        [Parameter(Mandatory = $true)][string]$Version,
-        [Parameter(Mandatory = $true)][string]$Minimum
-    )
-
-    $versionParts = $Version.Split('.') | ForEach-Object { [int]$_ }
-    $minimumParts = $Minimum.Split('.') | ForEach-Object { [int]$_ }
-    $count = [Math]::Max($versionParts.Length, $minimumParts.Length)
-    for ($i = 0; $i -lt $count; $i++) {
-        $value = if ($i -lt $versionParts.Length) { $versionParts[$i] } else { 0 }
-        $minimumValue = if ($i -lt $minimumParts.Length) { $minimumParts[$i] } else { 0 }
-        if ($value -gt $minimumValue) { return $true }
-        if ($value -lt $minimumValue) { return $false }
+function Resolve-VariantSources([string]$Version) {
+    if (-not $variantLayers.ContainsKey($Version)) {
+        throw "$Version is declared supported but has no variant layer, so it would build from src/main only and ship without the accessors and the controls and inventory screen mixins. Add a layer entry and a variant directory before claiming controller support."
     }
-    return $true
-}
 
-$sources = @(Get-ChildItem $srcJava -Recurse -Filter "*.java" | Select-Object -ExpandProperty FullName)
-if (Test-Path $controllerCoreJava) {
-    $sources += @(Get-ChildItem $controllerCoreJava -Recurse -Filter "*.java" | Select-Object -ExpandProperty FullName)
-}
-
-$variantLayers = @{
-    "1.20.1" = @("1.20.1")
-    "1.20.4" = @("1.20.4", "1.20.1")
-    "1.21.1" = @("1.21.1", "1.21", "1.20.4", "1.20.1")
-    "1.21.4" = @("1.21.4", "1.21", "1.20.4", "1.20.1")
-    "1.21.11" = @("1.21.11", "1.21.4", "1.21", "1.20.4", "1.20.1")
-}
-$overlayNames = @(
-    "BanditControllerCompat.java",
-    "BanditControllerSettingsScreen.java",
-    "FabricScreenApi.java",
-    "BanditControllerGameRendererMixin.java",
-    "BanditControllerScreenMixin.java",
-    "BanditControllerRecipeBookScreenMixin.java"
-)
-if (Test-Path (Join-Path $PSScriptRoot ("src\variants\$MinecraftVersion\banditvault\fabriccontroller\mixin\BanditControllerHandledScreenMixin.java"))) {
-    $overlayNames += "BanditControllerHandledScreenMixin.java"
-}
-if ($variantLayers.ContainsKey($MinecraftVersion)) {
-    $sources = @($sources | Where-Object { $overlayNames -notcontains (Split-Path $_ -Leaf) })
-    foreach ($name in $overlayNames) {
-        $relative = if ($name -like "*Mixin.java") {
-            Join-Path "banditvault\fabriccontroller\mixin" $name
-        } else {
-            Join-Path "banditvault\fabriccontroller" $name
-        }
-        $variantPath = $null
-        foreach ($layer in $variantLayers[$MinecraftVersion]) {
-            $candidate = Join-Path (Join-Path $PSScriptRoot ("src\variants\" + $layer)) $relative
-            if (Test-Path $candidate) {
-                $variantPath = $candidate
-                break
-            }
-        }
-        if (-not $variantPath) {
-            throw "Missing Fabric controller variant source for ${MinecraftVersion}: $relative"
-        }
-        $sources += $variantPath
+    $resolved = @{}
+    Get-ChildItem $srcJava -Recurse -Filter "*.java" | ForEach-Object { $resolved[$_.Name] = $_.FullName }
+    if (Test-Path $controllerCoreJava) {
+        Get-ChildItem $controllerCoreJava -Recurse -Filter "*.java" | ForEach-Object { $resolved[$_.Name] = $_.FullName }
     }
+
+    $layers = @($variantLayers[$Version])
+    for ($i = $layers.Count - 1; $i -ge 0; $i--) {
+        $layerDir = Join-Path $variantRootDir $layers[$i]
+        Get-ChildItem $layerDir -Recurse -Filter "*.java" | ForEach-Object { $resolved[$_.Name] = $_.FullName }
+    }
+    return @($resolved.Values)
 }
-if (Test-Path (Join-Path $PSScriptRoot ("src\variants\$MinecraftVersion"))) {
-    $variantRoot = Join-Path $PSScriptRoot "src\variants\$MinecraftVersion"
-    $sources += @(Get-ChildItem $variantRoot -Recurse -Filter "*.java" |
-        Select-Object -ExpandProperty FullName |
-        Where-Object { $sources -notcontains $_ })
-}
+
+$sources = @(Resolve-VariantSources $MinecraftVersion)
 if (-not $sources) { throw "No Fabric controller sources found" }
+
+$parityReference = "26.2"
+# the only allowed differences, each one a class the target's own Minecraft version cannot support
+$referenceOnlySources = @{
+    "1.20.1" = @{
+        "BanditControllerOptionsSubScreenAccessor.java" = "class_4667 has no field_51824 before 1.21.1, and the 1.20.x controls screen mixin adds its button without one"
+        "BanditControllerRecipeBookScreenAccessor.java" = "class_10260 does not exist before 1.21.2"
+    }
+    "1.20.4" = @{
+        "BanditControllerOptionsSubScreenAccessor.java" = "class_4667 has no field_51824 before 1.21.1, and the 1.20.x controls screen mixin adds its button without one"
+        "BanditControllerRecipeBookScreenAccessor.java" = "class_10260 does not exist before 1.21.2"
+    }
+    "1.21" = @{
+        "BanditControllerOptionsSubScreenAccessor.java" = "class_4667 has no field_51824 before 1.21.1, and the controls screen mixin adds its button without one"
+        "BanditControllerRecipeBookScreenAccessor.java" = "class_10260 does not exist before 1.21.2"
+    }
+    "1.21.1" = @{
+        "BanditControllerRecipeBookScreenAccessor.java" = "class_10260 does not exist before 1.21.2"
+    }
+    "1.21.2" = @{}
+    "1.21.3" = @{}
+    "1.21.4" = @{}
+    "1.21.5" = @{}
+    "1.21.6" = @{}
+    "1.21.7" = @{}
+    "1.21.8" = @{}
+    "1.21.9" = @{}
+    "1.21.10" = @{}
+    "1.21.11" = @{}
+    "26.1" = @{}
+    "26.1.1" = @{}
+    "26.1.2" = @{}
+    "26.2" = @{}
+}
+
+if ($MinecraftVersion -ne $parityReference) {
+    $referenceLeaves = @(Resolve-VariantSources $parityReference | ForEach-Object { Split-Path $_ -Leaf })
+    $targetLeaves = @($sources | ForEach-Object { Split-Path $_ -Leaf })
+    $allowed = $referenceOnlySources[$MinecraftVersion]
+    if ($null -eq $allowed) { throw "$MinecraftVersion has no `$referenceOnlySources entry, so its parity is undeclared. Add one, empty if the target is at parity." }
+
+    $missing = @($referenceLeaves | Where-Object { $targetLeaves -notcontains $_ } | Sort-Object)
+    $undeclared = @($missing | Where-Object { -not $allowed.ContainsKey($_) })
+    $closed = @($allowed.Keys | Where-Object { $targetLeaves -contains $_ } | Sort-Object)
+    $extra = @($targetLeaves | Where-Object { $referenceLeaves -notcontains $_ } | Sort-Object)
+
+    if ($undeclared) {
+        throw "$MinecraftVersion is missing $($undeclared.Count) source(s) that $parityReference has: $($undeclared -join ', '). Port them, or add each to `$referenceOnlySources with the reason its Minecraft version cannot support it."
+    }
+    if ($closed) {
+        throw "$MinecraftVersion now has $($closed -join ', '), which `$referenceOnlySources still declares as unsupportable. Remove those entries."
+    }
+    if ($extra) {
+        throw "$MinecraftVersion resolves $($extra -join ', '), which $parityReference does not have, so the reference is no longer the superset. Port them up before continuing."
+    }
+}
 
 $compileJars = @($clientJar, $mixinJar)
 $allLibraryJars = Get-ChildItem -LiteralPath (Join-Path $gameDir "libraries") -Recurse -Filter "*.jar" -ErrorAction SilentlyContinue |
@@ -122,47 +149,80 @@ $allLibraryJars = Get-ChildItem -LiteralPath (Join-Path $gameDir "libraries") -R
     Select-Object -ExpandProperty FullName
 if ($allLibraryJars) { $compileJars += $allLibraryJars }
 $cp = ($compileJars | Select-Object -Unique) -join ";"
-$javaRelease = if (Test-MinecraftVersionAtLeast -Version $MinecraftVersion -Minimum "1.21") { 21 } else { 8 }
+$javaRelease = if (Test-MinecraftVersionAtLeast -Version $MinecraftVersion -Minimum "1.21") { 21 } elseif (Test-MinecraftVersionAtLeast -Version $MinecraftVersion -Minimum "1.17") { 17 } else { 8 }
 
-$argsFile = Join-Path $buildRoot "javac-args.txt"
-$javacArgs = @(
-    "--release", "$javaRelease",
-    "-proc:none",
-    "-classpath", $cp,
-    "-d", $classesDir
-) + $sources
-[System.IO.File]::WriteAllLines($argsFile, $javacArgs)
-& $javac "@$argsFile"
-if ($LASTEXITCODE -ne 0) { throw "Fabric controller mod compile failed" }
+$stampPath = Join-Path $buildRoot "build.stamp"
+$variantResources = $null
+foreach ($layer in $variantLayers[$MinecraftVersion]) {
+    $candidate = Join-Path $PSScriptRoot "src\variants\$layer\resources"
+    if (Test-Path $candidate) {
+        $variantResources = $candidate
+        break
+    }
+}
+if (-not $variantResources) {
+    throw "Missing Fabric controller resources for $MinecraftVersion"
+}
+$resourceFiles = @(Get-ChildItem $srcResources -Recurse -File -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
+$resourceFiles += @(Get-ChildItem $variantResources -Recurse -File | Select-Object -ExpandProperty FullName)
+$compatLevel = if (Test-MinecraftVersionAtLeast -Version $MinecraftVersion -Minimum "1.21") { "JAVA_21" } elseif (Test-MinecraftVersionAtLeast -Version $MinecraftVersion -Minimum "1.17") { "JAVA_17" } else { "JAVA_8" }
+$stamp = New-BuildStamp `
+    -Values @(
+        "fabric_controller_mod",
+        $MinecraftVersion,
+        $LoaderVersion,
+        "release=$javaRelease",
+        "compatLevel=$compatLevel",
+        "jar=$jarName",
+        "sources=$(($sources | Sort-Object) -join ';')"
+    ) `
+    -ContentFiles (@($PSCommandPath) + $sources + $resourceFiles) `
+    -DependencyFiles @($clientJar, $mixinJar) `
+    -ImmutableFiles $allLibraryJars
 
-Copy-Item -Recurse "$srcResources\*" $classesDir -Force
-$variantResources = Join-Path $PSScriptRoot "src\variants\$MinecraftVersion\resources"
-if (Test-Path $variantResources) {
+if (Test-BuildStampCurrent -StampPath $stampPath -Stamp $stamp -RequiredOutputs @($jarPath)) {
+    Write-Host "Fabric controller mod up to date ($MinecraftVersion), skipping compile."
+} else {
+    Remove-Item -Recurse -Force $buildRoot -ErrorAction SilentlyContinue
+    Ensure-Dir $classesDir
+
+    $argsFile = Join-Path $buildRoot "javac-args.txt"
+    $javacArgs = @(
+        "--release", "$javaRelease",
+        "-proc:none",
+        "-classpath", $cp,
+        "-d", $classesDir
+    ) + $sources
+    [System.IO.File]::WriteAllLines($argsFile, $javacArgs)
+    & $javac "@$argsFile"
+    if ($LASTEXITCODE -ne 0) { throw "Fabric controller mod compile failed" }
+
+    Copy-Item -Recurse "$srcResources\*" $classesDir -Force
     Copy-Item -Recurse "$variantResources\*" $classesDir -Force
-}
-$fmj = Join-Path $classesDir "fabric.mod.json"
-(Get-Content $fmj -Raw).
-    Replace("__MINECRAFT_VERSION__", $MinecraftVersion).
-    Replace("__FABRIC_LOADER_VERSION__", $LoaderVersion) |
-    Set-Content $fmj -NoNewline
+    $fmj = Join-Path $classesDir "fabric.mod.json"
+    (Get-Content $fmj -Raw).
+        Replace("__MINECRAFT_VERSION__", $MinecraftVersion).
+        Replace("__FABRIC_LOADER_VERSION__", $LoaderVersion) |
+        Set-Content $fmj -NoNewline
 
-$mixinsPath = Join-Path $classesDir "banditvault-fabric-controller.mixins.json"
-if (-not (Test-MinecraftVersionAtLeast -Version $MinecraftVersion -Minimum "1.21")) {
-    $mixins = Get-Content -Raw -Path $mixinsPath | ConvertFrom-Json
-    $mixins.compatibilityLevel = "JAVA_8"
-    $mixins | ConvertTo-Json -Depth 10 | Set-Content -Path $mixinsPath
-}
-
-Push-Location $classesDir
-& $jar cf $jarPath .
-if ($LASTEXITCODE -ne 0) {
+    $mixinsPath = Join-Path $classesDir "banditvault-fabric-controller.mixins.json"
+    (Get-Content $mixinsPath -Raw).Replace("__COMPAT_LEVEL__", $compatLevel) | Set-Content $mixinsPath -NoNewline
+    Push-Location $classesDir
+    & $jar cf $jarPath .
+    if ($LASTEXITCODE -ne 0) {
+        Pop-Location
+        throw "Fabric controller mod jar failed"
+    }
     Pop-Location
-    throw "Fabric controller mod jar failed"
+
+    Set-BuildStamp -StampPath $stampPath -Stamp $stamp
 }
-Pop-Location
+
+& $java -ea -cp $jarPath banditvault.controllercore.ControllerBindings
+if ($LASTEXITCODE -ne 0) { throw "Fabric controller binding self-check failed" }
 
 if ($OutputDir) {
-    New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
+    Ensure-Dir $OutputDir
     Copy-Item $jarPath (Join-Path $OutputDir $jarName) -Force
 }
 Write-Host "Fabric controller mod built ($MinecraftVersion) -> $jarPath"

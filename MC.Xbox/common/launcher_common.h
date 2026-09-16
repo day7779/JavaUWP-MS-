@@ -37,12 +37,18 @@ std::string ToLowerAscii(std::string value);
 bool WriteAllBytes(const std::wstring& path, const void* data, size_t size);
 int CompareVersionNumbers(const std::string& lhs, const std::string& rhs);
 
+// calling thread must have RoInitialize'd
+bool ReadAppMemoryBudget(unsigned long long& limitMb, unsigned long long& usedMb);
+
 bool ReadZipTextFile(const std::wstring& zipPath, const char* entryName, std::wstring& out);
 
 std::wstring AppStateDir(const std::wstring& runtimeRoot);
 std::wstring LogsCurrentDir(const std::wstring& runtimeRoot);
 std::wstring LogsPreviousDir(const std::wstring& runtimeRoot);
 std::wstring CrashLaunchMarkerPath(const std::wstring& runtimeRoot);
+
+std::wstring LaunchSuspendedMarkerPath(const std::wstring& runtimeRoot);
+
 std::wstring CrashReportsDir(const std::wstring& runtimeRoot);
 std::wstring CrashTimestampForFileName();
 

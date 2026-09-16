@@ -17,7 +17,6 @@ $ProjectConfig = [ordered]@{
     FabricLoaderVersion      = if ($env:FABRIC_LOADER_VERSION) { $env:FABRIC_LOADER_VERSION } else { "0.19.2" }
     MixinVersion             = "0.17.2+mixin.0.8.7"
     JnaVersion               = "5.17.0"
-    LwjglGlfwVersion         = "3.3.3"
     JavaRelease              = 21
     CompatModId              = "banditvault-xbox-compat"
     CompatModVersion         = "1.0.0"
@@ -31,9 +30,11 @@ $ProjectConfig = [ordered]@{
     MesaRuntimeDir           = "mesa-runtime"
     ToolsDir                 = "staging/cache/tools"
     NotesDir                 = "staging/notes"
+    MetadataCacheDir         = "staging/cache/metadata"
     PackageContentDir        = "staging/package"
     CertificateDir           = "staging/certs"
     CertificateFileName      = "MC_DevMode.pfx"
-    CertificatePassword      = "devmode"
+    # throwaway password for a local dev-mode self-signed cert, the pfx itself is gitignored
+    CertificatePassword      = if ($env:APPX_CERT_PASSWORD) { $env:APPX_CERT_PASSWORD } else { "devmode" }
     DefaultCertificateSubject = "CN=BanditVault"
 }

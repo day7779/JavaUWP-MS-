@@ -10,10 +10,41 @@ param(
     [switch]$StopFileLockers,
     [switch]$SkipVersionManifests,
     [switch]$SkipVersionCompat,
-    [switch]$IncludePrebuiltNeoForgeArtifacts
+    [switch]$IncludePrebuiltNeoForgeArtifacts,
+    [switch]$StrictTargets
 )
 
 $ErrorActionPreference = "Stop"
+
+$buildLockDirectory = Join-Path $PSScriptRoot ".local"
+New-Item -ItemType Directory -Path $buildLockDirectory -Force | Out-Null
+try {
+    $buildLock = [System.IO.File]::Open(
+        (Join-Path $buildLockDirectory "build.lock"),
+        [System.IO.FileMode]::OpenOrCreate,
+        [System.IO.FileAccess]::ReadWrite,
+        [System.IO.FileShare]::None)
+} catch [System.IO.IOException] {
+    throw "Another Bandit Launcher build is already using this checkout."
+}
+
+try {
+
+$script:BuildFailures = @()
+function Add-BuildFailure {
+    param(
+        [Parameter(Mandatory = $true)][string]$Stage,
+        [Parameter(Mandatory = $true)][string]$Target,
+        [Parameter(Mandatory = $true)][string]$Reason
+    )
+    $script:BuildFailures += [pscustomobject]@{ Stage = $Stage; Target = $Target; Reason = $Reason }
+    Write-Warning "${Stage} skipped for ${Target}: $Reason"
+}
+
+# capture inherited overrides before applying command line values
+$inheritedMcVersion     = $env:MC_VERSION
+$inheritedFabricLoader  = $env:FABRIC_LOADER_VERSION
+$inheritedAssetIndex    = $env:MC_ASSET_INDEX
 
 # Push command-line overrides into the environment before sourcing config.
 # scripts/config.ps1 honors these so every downstream script (compat mod,
@@ -44,11 +75,12 @@ $jreSrc = Resolve-JavaHome
 $jre21Src = Resolve-JavaHomeExact -MajorVersion 21
 $jarExe = Join-Path $jreSrc "bin\jar.exe"
 if (-not (Test-Path $jarExe)) { $jarExe = "jar" }
-$pythonExe = Resolve-Python
 $tools = Resolve-VSTools
 $sdk = Resolve-WindowsSdk
 $sdkRoot = $sdk.Root
 $sdkVer = $sdk.Version
+# some sdk installs ship makeappx and signtool only under an older bin version
+$sdkToolsFallbackVer = "10.0.26100.0"
 
 function Assert-AppxVersion {
     param([Parameter(Mandatory = $true)][string]$Version)
@@ -76,12 +108,13 @@ $appVersionBase = "$($baseVersionParts[0]).$($baseVersionParts[1]).$($baseVersio
 # Auto-increment local builds from the package manifest base version so installs
 # update in place while CI can provide an exact APPX_VERSION for nightlies.
 $verFile = Join-Path $root ".local\app_build.txt"
+$verFileExisted = Test-Path $verFile
 if ($AppxVersion) {
     Assert-AppxVersion $AppxVersion
     $appVersion = $AppxVersion
 } else {
     $verRev = [int]$baseVersionParts[3]
-    if (Test-Path $verFile) {
+    if ($verFileExisted) {
         $prevParts = ((Get-Content $verFile -Raw).Trim()) -split '\.'
         $prevBase = if ($prevParts.Count -eq 4) { "$($prevParts[0]).$($prevParts[1]).$($prevParts[2])" } else { "" }
         if ($prevBase -eq $appVersionBase) { $verRev = [int]$prevParts[3] + 1 }
@@ -89,9 +122,52 @@ if ($AppxVersion) {
     if ($verRev -gt 65535) { $verRev = 65535 }
     $appVersion = "$appVersionBase.$verRev"
 }
-New-Item -ItemType Directory -Force -Path (Split-Path $verFile) | Out-Null
+Ensure-Dir (Split-Path $verFile)
 Set-Content -Path $verFile -Value $appVersion -NoNewline
 $appx = Join-Path $outDir ("BanditLauncher_{0}.appx" -f $appVersion)
+
+$mcVersionSource = if ($McVersion) {
+    "-McVersion"
+} elseif ($inheritedMcVersion) {
+    "MC_VERSION inherited from this shell"
+} else {
+    "config.ps1 default"
+}
+$fabricLoaderSource = if ($FabricLoader) {
+    "-FabricLoader"
+} elseif ($inheritedFabricLoader) {
+    "FABRIC_LOADER_VERSION inherited from this shell"
+} else {
+    "config.ps1 default"
+}
+$appVersionSource = if ($AppxVersion) {
+    "-AppxVersion"
+} elseif ($verFileExisted) {
+    ".local\app_build.txt"
+} else {
+    "fresh worktree, first build off the manifest base"
+}
+
+Write-Host ""
+Write-Host "Resolved build target:"
+Write-Host ("  MC version      {0}  ({1})" -f $ProjectConfig.MinecraftVersion, $mcVersionSource)
+Write-Host ("  Fabric loader   {0}  ({1})" -f $ProjectConfig.FabricLoaderVersion, $fabricLoaderSource)
+Write-Host ("  Asset index     {0}" -f $ProjectConfig.MinecraftAssetIndex)
+Write-Host ("  Appx version    {0}  ({1})" -f $appVersion, $appVersionSource)
+Write-Host ""
+
+foreach ($inherited in @(
+    @{ Name = "MC_VERSION";            Value = $inheritedMcVersion;    Param = $McVersion },
+    @{ Name = "FABRIC_LOADER_VERSION"; Value = $inheritedFabricLoader; Param = $FabricLoader },
+    @{ Name = "MC_ASSET_INDEX";        Value = $inheritedAssetIndex;   Param = $AssetIndex })) {
+    if ($inherited.Value -and -not $inherited.Param) {
+        Write-Warning ("{0}={1} was already set in this shell and is retargeting this build. Clear it with `$env:{0} = `$null, or open a new terminal." -f $inherited.Name, $inherited.Value)
+    }
+}
+
+if (-not $AppxVersion -and -not $verFileExisted) {
+    Write-Warning "No .local\app_build.txt in this worktree, so the appx stamps $appVersion. Anything already installed on the console at a higher version will not be replaced by it."
+}
 
 function Stop-BuildBlockingProcesses {
     param(
@@ -296,7 +372,7 @@ if (-not $SkipStopAppProcesses) {
         -LockPaths $lockPaths
 }
 
-New-Item -ItemType Directory -Force -Path $buildDir, $outDir, $certDir, $mcBuildDir, $glfwBuildDir | Out-Null
+Ensure-Dir $buildDir, $outDir, $certDir, $mcBuildDir, $glfwBuildDir
 
 Write-Host "=== Generating runtime_config.h ==="
 # Token-substitute MC.Xbox/runtime_config.h.in into the build dir. App.cpp
@@ -319,7 +395,7 @@ Push-Location (Join-Path $root "MC.Xbox")
 $env:INCLUDE = "$mcBuildDir;$($tools.MsvcRoot)\include;${sdkRoot}Include\$sdkVer\ucrt;${sdkRoot}Include\$sdkVer\shared;${sdkRoot}Include\$sdkVer\um;${sdkRoot}Include\$sdkVer\winrt;${sdkRoot}Include\$sdkVer\cppwinrt;$jreSrc\include;$jreSrc\include\win32"
 $env:LIB = "$($tools.MsvcRoot)\lib\x64;${sdkRoot}Lib\$sdkVer\ucrt\x64;${sdkRoot}Lib\$sdkVer\um\x64"
 
-& $tools.ClExe App.cpp launch\app_globals.cpp common\launcher_common.cpp common\crash_report.cpp mods\mod_defaults.cpp mods\modpack_io.cpp mods\world_io.cpp net\http_client.cpp profiles\profiles.cpp net\remote_file_server.cpp net\web_relay_server.cpp auth\minecraft_auth.cpp ui\launcher_ui.cpp ui\launcher_mouse.cpp ui\mods_ui_globals.cpp mods\mods_browser.cpp launch\runtime_manager.cpp launch\minecraft_launch.cpp launch\launch_internal.cpp launch\loaders\loader_common.cpp launch\loaders\loader.cpp launch\loaders\fabric.cpp launch\loaders\neoforge.cpp launch\loaders\forge.cpp third_party\miniz\miniz.c /std:c++17 /EHsc /W3 /O2 /GL /Gw /MP /arch:AVX2 /DNDEBUG /D_UNICODE /DUNICODE /D_WIN32_WINNT=0x0A00 /D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS /DMINIZ_NO_STDIO /DMINIZ_NO_TIME /I. /Icommon /Inet /Iauth /Iui /Imods /Iprofiles /Ilaunch /Ilaunch\loaders /I..\mouse_support /Fo"$mcBuildDir\" `
+& $tools.ClExe App.cpp launch\app_globals.cpp common\launcher_common.cpp common\crash_report.cpp mods\mod_defaults.cpp mods\modpack_io.cpp mods\world_io.cpp net\http_client.cpp profiles\profiles.cpp net\remote_file_server.cpp net\web_relay_server.cpp auth\minecraft_auth.cpp ui\launcher_ui.cpp ui\launcher_mouse.cpp ui\mods_ui_globals.cpp mods\mods_browser.cpp launch\runtime_manager.cpp launch\minecraft_launch.cpp launch\launch_internal.cpp launch\loaders\loader_common.cpp launch\loaders\loader.cpp launch\loaders\fabric.cpp launch\loaders\neoforge.cpp launch\loaders\forge.cpp telemetry\telemetry.cpp telemetry\crash_fingerprint.cpp telemetry\crash_parse.cpp telemetry\compat_feed.cpp third_party\miniz\miniz.c /std:c++17 /EHsc $CommonClFlags /O2 /GL /Gw /MP /arch:AVX2 /DNDEBUG /D_UNICODE /DUNICODE /D_WIN32_WINNT=0x0A00 /D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS /DMINIZ_NO_STDIO /DMINIZ_NO_TIME /I. /Icommon /Inet /Iauth /Iui /Imods /Iprofiles /Ilaunch /Ilaunch\loaders /Itelemetry /I..\mouse_support /Fo"$mcBuildDir\" `
     /DWINAPI_FAMILY=WINAPI_FAMILY_APP `
     /link /LTCG /SUBSYSTEM:WINDOWS /ENTRY:wWinMainCRTStartup /MACHINE:X64 `
     /OUT:"$mcExe" kernel32.lib shell32.lib runtimeobject.lib windowsapp.lib ole32.lib oleaut32.lib d2d1.lib dwrite.lib d3d11.lib dxgi.lib windowscodecs.lib winhttp.lib bcrypt.lib ws2_32.lib
@@ -330,6 +406,11 @@ Write-Host "MC.Xbox.exe built"
 Write-Host "=== Building mouse support DLL ==="
 & (Join-Path $root "mouse_support\build_mouse_support.ps1") -OutputDir $mouseSupportBuildDir
 if (-not (Test-Path $mouseSupportDll)) { throw "mouse_support DLL missing after build: $mouseSupportDll" }
+
+$audioRelayBuildDir = Join-Path $buildDir "audio_relay"
+& (Join-Path $root "audio_relay\build_audio_relay.ps1") -OutputDir $audioRelayBuildDir
+$audioRelayExe = Join-Path $audioRelayBuildDir "audio_relay.exe"
+if (-not (Test-Path $audioRelayExe)) { throw "audio_relay exe missing after build: $audioRelayExe" }
 
 Write-Host "=== Building GLFW CoreWindow shim ==="
 & (Join-Path $root "glfw_shim\build_glfw.ps1") -OutputDir $glfwBuildDir -MouseSupportLib $mouseSupportLib -MouseSupportInclude (Join-Path $root "mouse_support")
@@ -349,15 +430,15 @@ Write-Host "=== Patching Fabric Loader for Xbox filesystem ==="
 
 Write-Host "=== Assembling PackageContent ==="
 Remove-Item -Recurse -Force $pkg -ErrorAction SilentlyContinue
-New-Item -ItemType Directory -Force -Path (Join-Path $pkg "Assets") | Out-Null
-New-Item -ItemType Directory -Force -Path (Join-Path $pkg "natives") | Out-Null
-New-Item -ItemType Directory -Force -Path (Join-Path $pkg "graphics\mesa") | Out-Null
+Ensure-Dir (Join-Path $pkg "Assets")
+Ensure-Dir (Join-Path $pkg "natives")
+Ensure-Dir (Join-Path $pkg "graphics\mesa")
 # runtime/ holds only launcher-owned or intentionally patched runtime pieces.
 # Mojang/Fabric game files are downloaded into LocalState after auth.
-New-Item -ItemType Directory -Force -Path (Join-Path $pkg "runtime") | Out-Null
-New-Item -ItemType Directory -Force -Path (Join-Path $pkg "runtime\log_configs") | Out-Null
-New-Item -ItemType Directory -Force -Path (Join-Path $pkg "runtime\bundled-mods") | Out-Null
-New-Item -ItemType Directory -Force -Path (Join-Path $pkg "runtime\libraries") | Out-Null
+Ensure-Dir (Join-Path $pkg "runtime")
+Ensure-Dir (Join-Path $pkg "runtime\log_configs")
+Ensure-Dir (Join-Path $pkg "runtime\bundled-mods")
+Ensure-Dir (Join-Path $pkg "runtime\libraries")
 
 Copy-Item $mcExe (Join-Path $pkg "MC.Xbox.exe")
 
@@ -375,6 +456,13 @@ if (-not (Test-Path $versionCatalogSource)) {
 Copy-Item $versionCatalogSource (Join-Path $pkg "runtime\version_catalog.tsv") -Force
 Write-Host "Version catalog: $versionCatalogSource"
 
+$recommendedModsSource = Join-Path $root "config\recommended-mods.json"
+if (-not (Test-Path $recommendedModsSource)) {
+    throw "Recommended mods file not found at $recommendedModsSource"
+}
+Copy-Item $recommendedModsSource (Join-Path $pkg "runtime\recommended-mods.json") -Force
+Write-Host "Recommended mods: $recommendedModsSource"
+
 # NeoForge client jars are derived from the Minecraft client. Keep them out of normal and
 # nightly builds; opt in only for private diagnostics while on-device generation is being fixed.
 $prebuiltLibs = Join-Path $root "prebuilt\neoforge\libraries"
@@ -383,7 +471,7 @@ if (($IncludePrebuiltNeoForgeArtifacts -or $env:BANDIT_INCLUDE_PREBUILT_NEOFORGE
     Get-ChildItem $prebuiltLibs -Recurse -File | ForEach-Object {
         $rel = $_.FullName.Substring($prebuiltLibs.Length).TrimStart('\')
         $dst = Join-Path $prebuiltDst $rel
-        New-Item -ItemType Directory -Force -Path (Split-Path $dst -Parent) | Out-Null
+        Ensure-Dir (Split-Path $dst -Parent)
         Copy-Item $_.FullName $dst -Force
     }
     Write-Host "Packaged prebuilt NeoForge client jars from $prebuiltLibs"
@@ -399,15 +487,14 @@ function Ensure-FabricLoaderJar {
     if (-not (Test-Path $loaderSrc)) {
         $loaderUrl = "https://maven.fabricmc.net/net/fabricmc/fabric-loader/$LoaderVersion/fabric-loader-$LoaderVersion.jar"
         Write-Host "Downloading Fabric loader $LoaderVersion"
-        New-Item -ItemType Directory -Force -Path (Split-Path $loaderSrc -Parent) | Out-Null
+        Ensure-Dir (Split-Path $loaderSrc -Parent)
         Invoke-WebRequest -UseBasicParsing -Uri $loaderUrl -OutFile $loaderSrc -TimeoutSec 60
     }
 
     & (Join-Path $root "scripts\patch-fabric.ps1") -LoaderVersion $LoaderVersion
-    if ($LASTEXITCODE -ne 0) { throw "Fabric loader patch failed for $LoaderVersion" }
 
     $loaderDst = Join-Path $pkg "runtime\libraries\$loaderRelative"
-    New-Item -ItemType Directory -Force -Path (Split-Path $loaderDst -Parent) | Out-Null
+    Ensure-Dir (Split-Path $loaderDst -Parent)
     Copy-Item $loaderSrc $loaderDst -Force
     Write-Host "Packaged patched Fabric loader $LoaderVersion"
 }
@@ -420,7 +507,7 @@ function Ensure-TinyRemapperJar {
     if (-not (Test-Path $tinySrc)) {
         $tinyUrl = "https://maven.fabricmc.net/net/fabricmc/tiny-remapper/$TinyRemapperVersion/tiny-remapper-$TinyRemapperVersion.jar"
         Write-Host "Downloading TinyRemapper $TinyRemapperVersion"
-        New-Item -ItemType Directory -Force -Path (Split-Path $tinySrc -Parent) | Out-Null
+        Ensure-Dir (Split-Path $tinySrc -Parent)
         Invoke-WebRequest -UseBasicParsing -Uri $tinyUrl -OutFile $tinySrc -TimeoutSec 60
     }
 
@@ -433,7 +520,7 @@ function Ensure-TinyRemapperJar {
     $jarTmp = Join-Path $tmp "jar"
     $patchedTiny = Join-Path $tmp "tiny-remapper-$TinyRemapperVersion-patched.jar"
     Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
-    New-Item -ItemType Directory -Force -Path $srcTmp, $classesTmp, $jarTmp | Out-Null
+    Ensure-Dir $srcTmp, $classesTmp, $jarTmp
 
     foreach ($name in @("FileSystemReference.java", "FileSystemHandler.java", "OutputConsumerPath.java")) {
         $sourcePath = Join-Path $root "patch\$name"
@@ -459,7 +546,7 @@ function Ensure-TinyRemapperJar {
     foreach ($classFile in $classFiles) {
         $relativePath = $classFile.FullName.Substring($classesTmp.Length).TrimStart('\', '/')
         $dst = Join-Path $jarTmp $relativePath
-        New-Item -ItemType Directory -Force -Path (Split-Path $dst -Parent) | Out-Null
+        Ensure-Dir (Split-Path $dst -Parent)
         Copy-Item -LiteralPath $classFile.FullName -Destination $dst -Force
         Write-Host "  injected $($relativePath.Replace('\', '/'))"
     }
@@ -484,27 +571,19 @@ function Ensure-TinyRemapperJar {
     if ($LASTEXITCODE -ne 0) { throw "TinyRemapper JAR repack failed for $TinyRemapperVersion" }
 
     $tinyDst = Join-Path $pkg "runtime\libraries\$tinyRelative"
-    New-Item -ItemType Directory -Force -Path (Split-Path $tinyDst -Parent) | Out-Null
+    Ensure-Dir (Split-Path $tinyDst -Parent)
     Copy-Item $patchedTiny $tinyDst -Force
     Write-Host "Packaged patched TinyRemapper $TinyRemapperVersion"
 }
 
-$fabricTargets = @(
-    Import-Csv -Path $versionCatalogSource -Delimiter "`t" |
-        Where-Object { $_.loader -eq "fabric" -and $_.loaderVersion -and $_.loaderVersion -ne "selected" -and $_.loaderVersion -ne "none" }
-)
-$forgeTargets = @(
-    Import-Csv -Path $versionCatalogSource -Delimiter "`t" |
-        Where-Object { $_.loader -eq "forge" -and $_.loaderVersion -and $_.loaderVersion -ne "selected" -and $_.loaderVersion -ne "none" }
-)
-$neoForgeTargets = @(
-    Import-Csv -Path $versionCatalogSource -Delimiter "`t" |
-        Where-Object { $_.loader -eq "neoforge" -and $_.loaderVersion -and $_.loaderVersion -ne "selected" -and $_.loaderVersion -ne "none" }
-)
+$catalog = @(Import-Csv -Path $versionCatalogSource -Delimiter "`t")
 $manifestTargets = @(
-    Import-Csv -Path $versionCatalogSource -Delimiter "`t" |
+    $catalog |
         Where-Object { $_.loader -and $_.loaderVersion -and $_.loaderVersion -ne "selected" -and $_.loaderVersion -ne "none" }
 )
+$fabricTargets = @($manifestTargets | Where-Object { $_.loader -eq "fabric" })
+$forgeTargets = @($manifestTargets | Where-Object { $_.loader -eq "forge" })
+$neoForgeTargets = @($manifestTargets | Where-Object { $_.loader -eq "neoforge" })
 function Test-ForgeControllerTarget {
     param([Parameter(Mandatory = $true)]$Target)
 
@@ -533,7 +612,7 @@ foreach ($loaderVersion in $fabricLoaderVersions) {
         if ($loaderVersion -eq $ProjectConfig.FabricLoaderVersion) {
             throw
         }
-        Write-Warning "Skipping patched Fabric loader ${loaderVersion}: $($_.Exception.Message)"
+        Add-BuildFailure -Stage "Patched Fabric loader" -Target $loaderVersion -Reason $_.Exception.Message
     }
 }
 if ($fabricLoaderVersions -contains "0.14.25") {
@@ -569,6 +648,7 @@ Write-Host "Copying GLFW shim..."
 Copy-Item $shimDll (Join-Path $pkg "natives\glfw.dll") -Force
 Copy-Item $mouseSupportDll (Join-Path $pkg "mouse_support.dll") -Force
 Copy-Item $mouseSupportDll (Join-Path $pkg "natives\mouse_support.dll") -Force
+Copy-Item $audioRelayExe (Join-Path $pkg "audio_relay.exe") -Force
 
 Write-Host "Copying Mesa runtime..."
 $mesaRuntime = Resolve-MesaRuntimeDir -MesaRuntimeDir $MesaRuntimeDir
@@ -583,18 +663,52 @@ foreach ($dll in Get-MesaRuntimeDllNames) {
     }
 }
 
-Write-Host "Generating official download manifest..."
-& (Join-Path $root "scripts\new-download-manifest.ps1") `
+$manifestGenerator = Join-Path $root "scripts\new-download-manifest.ps1"
+$manifestCacheRoot = Join-Path (Get-ConfigPath "StagingDir") "cache\manifests"
+Ensure-Dir $manifestCacheRoot
+
+function Copy-CachedVersionManifest {
+    param(
+        [Parameter(Mandatory = $true)][string]$MinecraftVersion,
+        [Parameter(Mandatory = $true)][string]$Loader,
+        [Parameter(Mandatory = $true)][string]$LoaderVersion,
+        [Parameter(Mandatory = $true)][string]$OutputPath
+    )
+
+    $targetId = "$MinecraftVersion-$Loader-$LoaderVersion"
+    $cachePath = Join-Path $manifestCacheRoot "$targetId.tsv"
+    $stampPath = "$cachePath.stamp"
+    $stamp = New-BuildStamp `
+        -Values @("download_manifest", $MinecraftVersion, $Loader, $LoaderVersion) `
+        -ContentFiles @($manifestGenerator, (Join-Path $root "scripts\common.ps1"))
+
+    if (Test-BuildStampCurrent -StampPath $stampPath -Stamp $stamp -RequiredOutputs @($cachePath)) {
+        Write-Host "Download manifest up to date: $targetId"
+    } else {
+        Write-Host "Generating download manifest: $targetId"
+        & $manifestGenerator `
+            -MinecraftVersion $MinecraftVersion `
+            -Loader $Loader `
+            -LoaderVersion $LoaderVersion `
+            -OutputPath $cachePath
+        Set-BuildStamp -StampPath $stampPath -Stamp $stamp
+    }
+
+    Ensure-Dir (Split-Path $OutputPath -Parent)
+    Copy-Item -LiteralPath $cachePath -Destination $OutputPath -Force
+}
+
+$defaultDownloadManifest = Join-Path $pkg "download_manifest.tsv"
+Copy-CachedVersionManifest `
     -MinecraftVersion $ProjectConfig.MinecraftVersion `
     -Loader "fabric" `
     -LoaderVersion $ProjectConfig.FabricLoaderVersion `
-    -FabricLoaderVersion $ProjectConfig.FabricLoaderVersion `
-    -OutputPath (Join-Path $pkg "download_manifest.tsv")
+    -OutputPath $defaultDownloadManifest
 
 $manifestsDir = Join-Path $pkg "runtime\manifests"
-New-Item -ItemType Directory -Force -Path $manifestsDir | Out-Null
+Ensure-Dir $manifestsDir
 $defaultTargetId = "$($ProjectConfig.MinecraftVersion)-fabric-$($ProjectConfig.FabricLoaderVersion)"
-Copy-Item -Force (Join-Path $pkg "download_manifest.tsv") (Join-Path $manifestsDir "$defaultTargetId.tsv")
+Copy-Item -Force $defaultDownloadManifest (Join-Path $manifestsDir "$defaultTargetId.tsv")
 Write-Host "Default per-version manifest: $defaultTargetId.tsv"
 
 if (-not $SkipVersionManifests) {
@@ -604,15 +718,14 @@ if (-not $SkipVersionManifests) {
         $targetId = "$($row.minecraftVersion)-$loader-$lv"
         if ($targetId -eq $defaultTargetId) { continue }
         $out = Join-Path $manifestsDir "$targetId.tsv"
-        Write-Host "Generating per-version manifest: $targetId"
         try {
-            & (Join-Path $root "scripts\new-download-manifest.ps1") `
+            Copy-CachedVersionManifest `
                 -MinecraftVersion $row.minecraftVersion `
                 -Loader $loader `
                 -LoaderVersion $lv `
                 -OutputPath $out
         } catch {
-            Write-Warning "Skipping ${targetId}: $($_.Exception.Message)"
+            Add-BuildFailure -Stage "Download manifest" -Target $targetId -Reason $_.Exception.Message
             if (Test-Path $out) { Remove-Item -Force $out }
         }
     }
@@ -622,7 +735,7 @@ if (-not $SkipVersionManifests) {
 
 if (-not $SkipVersionCompat) {
     $versionModsRoot = Join-Path $pkg "runtime\version-mods"
-    New-Item -ItemType Directory -Force -Path $versionModsRoot | Out-Null
+    Ensure-Dir $versionModsRoot
     foreach ($row in $fabricTargets) {
         $lv = $row.loaderVersion
         $targetId = "$($row.minecraftVersion)-fabric-$lv"
@@ -635,7 +748,7 @@ if (-not $SkipVersionCompat) {
                 -LoaderVersion $lv `
                 -OutputDir $outDir
         } catch {
-            Write-Warning "Per-version compat mod skipped for ${targetId}: $($_.Exception.Message)"
+            Add-BuildFailure -Stage "Compat mod" -Target $targetId -Reason $_.Exception.Message
             if (Test-Path $outDir) { Remove-Item -Recurse -Force $outDir }
         }
         if (Test-FabricControllerTarget -Target $row) {
@@ -646,7 +759,7 @@ if (-not $SkipVersionCompat) {
                     -LoaderVersion $lv `
                     -OutputDir $outDir
             } catch {
-                Write-Warning "Per-version Fabric controller mod skipped for ${targetId}: $($_.Exception.Message)"
+                Add-BuildFailure -Stage "Fabric controller mod" -Target $targetId -Reason $_.Exception.Message
             }
         } else {
             Write-Host "Skipping per-version Fabric controller mod for ${targetId}: no bundled controller provider for this target"
@@ -667,7 +780,7 @@ if (-not $SkipVersionCompat) {
                 -ForgeVersion "$($row.minecraftVersion)-$lv" `
                 -OutputDir $outDir
         } catch {
-            Write-Warning "Per-version Forge controller mod skipped for ${targetId}: $($_.Exception.Message)"
+            Add-BuildFailure -Stage "Forge controller mod" -Target $targetId -Reason $_.Exception.Message
             if (Test-Path $outDir) { Remove-Item -Recurse -Force $outDir }
         }
     }
@@ -686,7 +799,7 @@ if (-not $SkipVersionCompat) {
                 -NeoForgeVersion $lv `
                 -OutputDir $outDir
         } catch {
-            Write-Warning "Per-version NeoForge controller mod skipped for ${targetId}: $($_.Exception.Message)"
+            Add-BuildFailure -Stage "NeoForge controller mod" -Target $targetId -Reason $_.Exception.Message
             if (Test-Path $outDir) { Remove-Item -Recurse -Force $outDir }
         }
     }
@@ -699,7 +812,7 @@ Copy-Item -Force (Join-Path $root "log_configs\client-uwp.xml") (Join-Path $pkg 
 $screenshotSource = Join-Path $root "MC.Xbox\Assets\screenshots"
 if (Test-Path $screenshotSource) {
     $screenshotTarget = Join-Path $pkg "Assets\screenshots"
-    New-Item -ItemType Directory -Force -Path $screenshotTarget | Out-Null
+    Ensure-Dir $screenshotTarget
     Copy-Item -Force (Join-Path $screenshotSource "*.png") $screenshotTarget
     Write-Host "Copied menu screenshot assets from $screenshotSource"
 }
@@ -737,11 +850,11 @@ function Build-JavaBaseUwpFilesystemPatch {
     $javaBasePatchSrcDir = Join-Path $javaBasePatchDir "src"
     $javaBasePatchClassesDir = Join-Path $javaBasePatchDir "classes"
     Remove-Item -Recurse -Force $javaBasePatchDir -ErrorAction SilentlyContinue
-    New-Item -ItemType Directory -Force -Path `
+    Ensure-Dir `
         (Join-Path $javaBasePatchSrcDir "java\io"), `
         (Join-Path $javaBasePatchSrcDir "java\security"), `
         (Join-Path $javaBasePatchSrcDir "sun\nio\fs"), `
-        $javaBasePatchClassesDir | Out-Null
+        $javaBasePatchClassesDir
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $srcArchive = [System.IO.Compression.ZipFile]::OpenRead($srcZip)
     try {
@@ -851,7 +964,7 @@ function Build-JavaZipfsRealpathPatch {
     $zipfsPatchSrcDir = Join-Path $zipfsPatchDir "src"
     $zipfsPatchClassesDir = Join-Path $zipfsPatchDir "classes"
     Remove-Item -Recurse -Force $zipfsPatchDir -ErrorAction SilentlyContinue
-    New-Item -ItemType Directory -Force -Path (Join-Path $zipfsPatchSrcDir "jdk\nio\zipfs"), $zipfsPatchClassesDir | Out-Null
+    Ensure-Dir (Join-Path $zipfsPatchSrcDir "jdk\nio\zipfs"), $zipfsPatchClassesDir
 
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $srcArchive = [System.IO.Compression.ZipFile]::OpenRead($srcZip)
@@ -932,7 +1045,7 @@ function Build-JavaDesktopUwpAwtPatch {
     $desktopPatchSrcDir = Join-Path $desktopPatchDir "src"
     $desktopPatchClassesDir = Join-Path $desktopPatchDir "classes"
     Remove-Item -Recurse -Force $desktopPatchDir -ErrorAction SilentlyContinue
-    New-Item -ItemType Directory -Force -Path (Join-Path $desktopPatchSrcDir "sun\awt\windows"), $desktopPatchClassesDir | Out-Null
+    Ensure-Dir (Join-Path $desktopPatchSrcDir "sun\awt\windows"), $desktopPatchClassesDir
 
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $srcArchive = [System.IO.Compression.ZipFile]::OpenRead($srcZip)
@@ -971,6 +1084,44 @@ function Build-JavaDesktopUwpAwtPatch {
     Write-Host "Java desktop UWP AWT patch: $OutputJar"
 }
 
+function Build-MicRelayJar {
+    param(
+        [Parameter(Mandatory = $true)][string]$JavaHome,
+        [Parameter(Mandatory = $true)][string]$OutputJar,
+        [Parameter(Mandatory = $true)][string]$OutputModJar
+    )
+
+    Write-Host "Building relay microphone jar: $OutputJar"
+    $javacExe = Join-Path $JavaHome "bin\javac.exe"
+    if (-not (Test-Path $javacExe)) { throw "javac.exe not found at $javacExe; relay-mic jar requires a JDK, not a JRE." }
+    $micJarExe = Join-Path $JavaHome "bin\jar.exe"
+    if (-not (Test-Path $micJarExe)) { $micJarExe = $jarExe }
+    $micSrc = Join-Path $root "mic_relay\src\main\java"
+    $micRes = Join-Path $root "mic_relay\src\main\resources"
+    $micWork = Join-Path $buildDir "mic_relay"
+    $micClasses = Join-Path $micWork "classes"
+    Remove-Item -Recurse -Force $micWork -ErrorAction SilentlyContinue
+    New-Item -ItemType Directory -Force -Path $micClasses | Out-Null
+    $micSources = Get-ChildItem -Recurse -Filter *.java $micSrc | ForEach-Object { $_.FullName }
+    & $javacExe --release 17 -d $micClasses $micSources
+    if ($LASTEXITCODE -ne 0) { throw "relay-mic compile failed" }
+    Copy-Item -Recurse -Force (Join-Path $micRes "*") $micClasses
+    Push-Location $micClasses
+    & $micJarExe cf $OutputJar .
+    Pop-Location
+    if ($LASTEXITCODE -ne 0) { throw "relay-mic jar creation failed" }
+    Write-Host "Relay microphone jar: $OutputJar"
+
+    Copy-Item -Force (Join-Path $root "mic_relay\modmeta\mods.toml") (Join-Path $micClasses "META-INF\mods.toml")
+    Copy-Item -Force (Join-Path $root "mic_relay\modmeta\neoforge.mods.toml") (Join-Path $micClasses "META-INF\neoforge.mods.toml")
+    Copy-Item -Force (Join-Path $root "mic_relay\modmeta\pack.mcmeta") (Join-Path $micClasses "pack.mcmeta")
+    Push-Location $micClasses
+    & $micJarExe cf $OutputModJar .
+    Pop-Location
+    if ($LASTEXITCODE -ne 0) { throw "relay-mic mod jar creation failed" }
+    Write-Host "Relay microphone mod jar: $OutputModJar"
+}
+
 function Resolve-SecureJarHandlerJar {
     param([Parameter(Mandatory = $true)][string]$Version)
 
@@ -989,7 +1140,7 @@ function Resolve-SecureJarHandlerJar {
     $downloadPath = Join-Path $gameDir "libraries\$relative"
     $url = "https://maven.neoforged.net/releases/cpw/mods/securejarhandler/$Version/securejarhandler-$Version.jar"
     Write-Host "Downloading securejarhandler $Version"
-    New-Item -ItemType Directory -Force -Path (Split-Path $downloadPath -Parent) | Out-Null
+    Ensure-Dir (Split-Path $downloadPath -Parent)
     Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $downloadPath -TimeoutSec 60
     return (Resolve-Path $downloadPath).Path
 }
@@ -1017,7 +1168,7 @@ function Build-SecureJarHandlerUwpPatch {
     $patchDir = Join-Path $buildDir "securejarhandler_uwp_patch\$Version"
     $classesDir = Join-Path $patchDir "classes"
     Remove-Item -Recurse -Force $patchDir -ErrorAction SilentlyContinue
-    New-Item -ItemType Directory -Force -Path $classesDir | Out-Null
+    Ensure-Dir $classesDir
 
     & $javacExe --release 21 -cp $secureJar -d $classesDir $patchSources
     if ($LASTEXITCODE -ne 0) { throw "securejarhandler UWP patch compile failed" }
@@ -1040,7 +1191,7 @@ try {
     Build-JavaDesktopUwpAwtPatch -JavaHome $jre17Src -OutputJar (Join-Path $pkg "java-desktop-uwp-awt-17.jar") -WorkName "java_desktop_uwp_awt_patch_17"
     Write-Host "Packaged Java 17 runtime for 1.18.x / 1.20.2-1.20.4 targets"
 } catch {
-    Write-Warning "Java 17 JRE not packaged: $($_.Exception.Message). Targets with javaRuntime=java17 need JDK 17 on the build machine."
+    Add-BuildFailure -Stage "Java 17 JRE" -Target "javaRuntime=java17 targets" -Reason "$($_.Exception.Message). Needs JDK 17 on the build machine."
 }
 Build-JavaBaseUwpFilesystemPatch -JavaHome $jreSrc -OutputJar (Join-Path $pkg "java-base-uwp-filesystem.jar") -WorkName "java_base_uwp_filesystem_patch_current"
 Build-JavaBaseUwpFilesystemPatch -JavaHome $jre21Src -OutputJar (Join-Path $pkg "java-base-uwp-filesystem-21.jar") -WorkName "java_base_uwp_filesystem_patch_21"
@@ -1049,10 +1200,41 @@ Build-JavaZipfsRealpathPatch -JavaHome $jre21Src -OutputJar (Join-Path $pkg "jav
 Build-JavaDesktopUwpAwtPatch -JavaHome $jreSrc -OutputJar (Join-Path $pkg "java-desktop-uwp-awt.jar") -WorkName "java_desktop_uwp_awt_patch_current"
 Build-JavaDesktopUwpAwtPatch -JavaHome $jre21Src -OutputJar (Join-Path $pkg "java-desktop-uwp-awt-21.jar") -WorkName "java_desktop_uwp_awt_patch_21"
 Build-SecureJarHandlerUwpPatch -JavaHome $jre21Src -Version "3.0.8" -OutputJar (Join-Path $pkg "securejarhandler-uwp-patch.jar")
+$micRelayModJar = Join-Path (Join-Path $buildDir "mic_relay") "bandit_mic_relay-1.0.0.jar"
+Build-MicRelayJar -JavaHome $jre21Src -OutputJar (Join-Path $pkg "relay-mic.jar") -OutputModJar $micRelayModJar
+if (-not $SkipVersionCompat) {
+    $micVersionModsRoot = Join-Path $pkg "runtime\version-mods"
+    foreach ($row in $forgeTargets) {
+        $mcMinor = 0
+        $mcParts = "$($row.minecraftVersion)".Split('.')
+        if ($mcParts.Length -ge 2) { $mcMinor = [int]$mcParts[1] }
+        if ($row.javaRuntime -eq "legacy" -or $mcMinor -lt 19) {
+            Write-Host "Skipping mic relay mod for $($row.minecraftVersion) forge: loader too old for lowcodefml"
+            continue
+        }
+        $targetId = "$($row.minecraftVersion)-forge-$($row.loaderVersion)"
+        $outDir = Join-Path $micVersionModsRoot $targetId
+        New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+        Copy-Item -Force $micRelayModJar (Join-Path $outDir "bandit_mic_relay-1.0.0.jar")
+        Write-Host "Bundled mic relay mod for ${targetId}"
+    }
+    foreach ($row in $neoForgeTargets) {
+        $targetId = "$($row.minecraftVersion)-neoforge-$($row.loaderVersion)"
+        $outDir = Join-Path $micVersionModsRoot $targetId
+        New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+        Copy-Item -Force $micRelayModJar (Join-Path $outDir "bandit_mic_relay-1.0.0.jar")
+        Write-Host "Bundled mic relay mod for ${targetId}"
+    }
+}
 
-Write-Host "Generating UWP tile assets..."
-& $pythonExe (Join-Path $root "scripts\generate-assets.py") $pkg
-if ($LASTEXITCODE -ne 0) { throw "Asset generation failed" }
+Write-Host "Copying UWP tile assets..."
+$appxAssetSource = Join-Path $root "MC.Xbox\Assets\appx"
+$appxAssetNames = @("StoreLogo.png", "Square44x44Logo.png", "Square150x150Logo.png", "Wide310x150Logo.png", "SplashScreen.png")
+foreach ($name in $appxAssetNames) {
+    $source = Join-Path $appxAssetSource $name
+    if (-not (Test-Path $source)) { throw "Packaged tile asset missing: $source" }
+    Copy-Item -Force $source (Join-Path $pkg "Assets\$name")
+}
 
 Write-Host "=== Packaging ==="
 $cert = Join-Path $certDir $ProjectConfig.CertificateFileName
@@ -1074,19 +1256,18 @@ $allSigningCertCandidates = Get-ChildItem Cert:\CurrentUser\My |
     }
 $exactSigningCertCandidates = $allSigningCertCandidates | Where-Object { $_.Subject -eq $certName } | Sort-Object NotBefore -Descending
 $banditVaultSigningCertCandidates = $allSigningCertCandidates | Where-Object { $_.Subject -like '*BanditVault*' -and $_.Subject -ne $certName } | Sort-Object NotBefore -Descending
-$otherSigningCertCandidates = $allSigningCertCandidates | Where-Object { $_.Subject -notlike '*BanditVault*' } | Sort-Object NotBefore -Descending
-$signingCertCandidates = @($exactSigningCertCandidates) + @($banditVaultSigningCertCandidates) + @($otherSigningCertCandidates)
+$signingCertCandidates = @($exactSigningCertCandidates) + @($banditVaultSigningCertCandidates)
 if (-not $signingCertCandidates) {
-    throw "Signing certificate not found in the current user certificate store."
+    throw "No signing certificate for '$certName' in Cert:\CurrentUser\My. Restore the BanditVault certificate, or set APPX_CERT_SUBJECT to the subject you want to sign with. Signing with an unrelated certificate changes the package family name and loses LocalState."
 }
 
-$makeappx = Get-ChildItem "${sdkRoot}bin\$sdkVer\x64\makeappx.exe","${sdkRoot}bin\10.0.26100.0\x64\makeappx.exe" -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+$makeappx = Get-ChildItem "${sdkRoot}bin\$sdkVer\x64\makeappx.exe","${sdkRoot}bin\$sdkToolsFallbackVer\x64\makeappx.exe" -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
 if (-not $makeappx) {
     $cmd = Get-Command makeappx -ErrorAction SilentlyContinue
     if ($cmd) { $makeappx = $cmd.Source }
 }
 if (-not $makeappx) { throw "makeappx.exe not found. Add Windows SDK bin to PATH." }
-$signtool = Get-ChildItem "${sdkRoot}bin\$sdkVer\x64\signtool.exe","${sdkRoot}bin\10.0.26100.0\x64\signtool.exe" -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+$signtool = Get-ChildItem "${sdkRoot}bin\$sdkVer\x64\signtool.exe","${sdkRoot}bin\$sdkToolsFallbackVer\x64\signtool.exe" -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
 if (-not $signtool) { $signtool = "signtool" }
 
 if (-not $SkipStopAppProcesses) {
@@ -1128,18 +1309,7 @@ foreach ($signingCert in $signingCertCandidates) {
 }
 
 if (-not $signingSucceeded) {
-    Write-Warning "Appx signing failed with the existing store certificates; generating a fresh dev certificate and retrying once."
-    Remove-Item $cert -Force -ErrorAction SilentlyContinue
-
-    $c = New-SelfSignedCertificate -Type CodeSigningCert -Subject $certName `
-        -KeyUsage DigitalSignature -CertStoreLocation "Cert:\CurrentUser\My" `
-        -TextExtension @("2.5.29.37={text}1.3.6.1.5.5.7.3.3","2.5.29.19={text}")
-    Export-PfxCertificate -Cert $c -FilePath $cert `
-        -Password (ConvertTo-SecureString $ProjectConfig.CertificatePassword -AsPlainText -Force) | Out-Null
-
-    if (-not (Invoke-AppxSign -AppxPath $appx -CertificateThumbprint $c.Thumbprint -SigntoolPath $signtool)) {
-        throw "Appx signing failed"
-    }
+    throw "Appx signing failed with every certificate matching '$certName'. The certificate is present but signtool rejected it, so check that it has not expired and that its private key is readable. Nothing was deleted."
 }
 if (-not (Test-Path $appx)) { throw "Appx package was not created" }
 
@@ -1151,3 +1321,15 @@ if (-not $KeepStaging) {
 Write-Host ""
 Write-Host "=== Done ==="
 Write-Host "Package: $appx"
+
+if ($script:BuildFailures.Count -gt 0) {
+    Write-Host ""
+    Write-Host "=== $($script:BuildFailures.Count) target(s) skipped ==="
+    $script:BuildFailures | Format-Table Stage, Target, Reason -AutoSize -Wrap | Out-String -Width 200 | Write-Host
+    if ($StrictTargets) {
+        exit 1
+    }
+}
+} finally {
+    $buildLock.Dispose()
+}

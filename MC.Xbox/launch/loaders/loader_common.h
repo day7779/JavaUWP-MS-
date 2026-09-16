@@ -21,3 +21,8 @@ enum class LoaderId {
 
 LoaderId ParseLoaderId(const std::wstring& loader);
 bool IsLoader(const std::wstring& loader, LoaderId id);
+
+bool ExtractZipEntryToFile(const std::wstring& zipPath, const char* entryName, const std::wstring& outputPath);
+bool FileExistsNonEmpty(const std::wstring& path);
+bool EndsWithAscii(const char* text, const char* suffix);
+bool ZipIsValid(const std::wstring& zipPath);
