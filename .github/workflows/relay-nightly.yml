@@ -65,14 +65,14 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
-
-      - name: Install Android build packages
-        shell: bash
-        run: |
-          set +o pipefail
-          yes | sdkmanager --licenses >/dev/null
-          set -o pipefail
-          sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;28.2.13676358" "cmake;3.22.1"
+        with:
+          packages: |
+            platform-tools
+            platforms;android-36
+            build-tools;36.0.0
+            ndk;28.2.13676358
+            cmake;3.22.1
+          accept-android-sdk-licenses: true
 
       - name: Build Android APK
         working-directory: tools/relay/android
