@@ -828,6 +828,9 @@ function Copy-PackagedJre {
     Write-Host "Copying JRE ($PackageRelativeDir)..."
     Write-Host "JRE source: $JavaHome"
     Copy-Item -Recurse $JavaHome $dest
+    # jmods is jlink input, nothing at runtime opens it, and it is about 80 MB of every packaged jre
+    $jmods = Join-Path $dest "jmods"
+    if (Test-Path $jmods) { Remove-Item -Recurse -Force $jmods }
     Copy-Item $SecurityPropertiesPath (Join-Path $dest "conf\security\xbox.properties") -Force
     Copy-Item $SecurityPropertiesPath (Join-Path $dest "conf\security\java.security") -Force
 }
