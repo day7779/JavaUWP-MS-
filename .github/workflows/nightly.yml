@@ -79,6 +79,8 @@ jobs:
         with:
           path: staging/cache/gameDir/.fabric/remappedJars
           key: fabric-remap-${{ runner.os }}-${{ hashFiles('scripts/config.ps1') }}
+          restore-keys: |
+            fabric-remap-${{ runner.os }}-
 
       - name: Restore loader installer cache
         uses: actions/cache@v4
@@ -179,11 +181,41 @@ jobs:
 
       - name: Move nightly tag
         shell: powershell
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -f nightly $env:GITHUB_SHA
-          git push --force origin refs/tags/nightly
+          # Move the tag via the git refs REST API instead of `git push`:
+          # pushing commits that touch .github/workflows/* over the git protocol
+          # is rejected for the Actions token without workflows permission, and
+          # the nightly delta can include workflow file changes.
+          $apiBase = if ($env:GITHUB_API_URL) { $env:GITHUB_API_URL } else { "https://api.github.com" }
+          $headers = @{
+            Authorization = "Bearer $env:GH_TOKEN"
+            Accept = "application/vnd.github+json"
+            "X-GitHub-Api-Version" = "2022-11-28"
+          }
+          $tagBody = @{
+            tag = "nightly"
+            message = "Nightly build $env:GITHUB_SHA"
+            object = $env:GITHUB_SHA
+            type = "commit"
+          } | ConvertTo-Json
+          $tagObj = Invoke-RestMethod -Method Post -Uri "$apiBase/repos/$env:GITHUB_REPOSITORY/git/tags" -Headers $headers -ContentType "application/json" -Body $tagBody
+          $refBody = @{ ref = "refs/tags/nightly"; sha = $tagObj.sha; force = $true } | ConvertTo-Json
+          try {
+            Invoke-RestMethod -Method Post -Uri "$apiBase/repos/$env:GITHUB_REPOSITORY/git/refs" -Headers $headers -ContentType "application/json" -Body $refBody | Out-Null
+          } catch {
+            $statusCode = $null
+            if ($_.Exception.Response) {
+              $statusCode = [int]$_.Exception.Response.StatusCode
+            }
+            if ($statusCode -eq 422) {
+              Invoke-RestMethod -Method Patch -Uri "$apiBase/repos/$env:GITHUB_REPOSITORY/git/refs/tags/nightly" -Headers $headers -ContentType "application/json" -Body (@{ sha = $tagObj.sha; force = $true } | ConvertTo-Json) | Out-Null
+            } else {
+              throw
+            }
+          }
+          Write-Host "nightly tag now points at $env:GITHUB_SHA"
 
       - name: Publish nightly release
         shell: powershell
