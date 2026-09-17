@@ -63,16 +63,26 @@ jobs:
         with:
           gradle-version: "8.14.3"
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
       - name: Install Android build packages
         shell: bash
         run: |
+          set -e
+          SDK_BIN="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}/cmdline-tools/latest/bin"
+          if ! command -v sdkmanager >/dev/null 2>&1; then
+            SDK_TOOLS_DIR="$(ls -d "${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"/cmdline-tools/*/bin 2>/dev/null | sort -V | tail -n1)"
+            if [ -z "$SDK_TOOLS_DIR" ]; then
+              echo "sdkmanager not found and no cmdline-tools directory located" >&2
+              exit 1
+            fi
+            SDK_BIN="$SDK_TOOLS_DIR"
+            echo "Adding $SDK_TOOLS_DIR to PATH"
+            echo "$SDK_TOOLS_DIR" >> "$GITHUB_PATH"
+          fi
+          export PATH="$SDK_BIN:$PATH"
           set +o pipefail
           yes | sdkmanager --licenses >/dev/null
           set -o pipefail
-          sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;28.2.13676358" "cmake;3.22.1"
+          sdkmanager --install "platform-tools" "platforms;android-36" "build-tools;36.0.0" "ndk;28.2.13676358" "cmake;3.22.1"
 
       - name: Build Android APK
         working-directory: tools/relay/android
